@@ -5,7 +5,7 @@
 ci: lint test lint-spine
 
 lint:
-	bash -n install.sh uninstall.sh
+	bash -n install.sh uninstall.sh skills/saga/saga-lint/scripts/run.sh
 	node --check bin/saga-statusline.js
 	ruff check bin/saga-project bin/saga-lint tests
 

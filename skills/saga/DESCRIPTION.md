@@ -27,6 +27,8 @@ When to reach for which skill:
   drain (verify → audit → ROADMAP flip). Slash-only.
 - **saga-audit** — frontier-model quality review after execution. Produces
   `.planning/AUDIT.md`. Slash-only.
+- **saga-lint** — read-only structural health check for a current or supplied
+  Saga spine. Returns stable human/JSON findings without fixing records.
 
 House rules: never create phase directories; never force a .planning/ spine
 into a repo that lacks one; inspect before mutating; verification reads the

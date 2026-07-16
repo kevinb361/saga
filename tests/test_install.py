@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -64,6 +65,54 @@ def test_install_is_idempotent(tmp_path: Path) -> None:
     assert first.returncode == 0, first.stderr
     assert second.returncode == 0, second.stderr
     assert_installed(tmp_path / "claude")
+
+
+def test_installed_saga_lint_skill_runs_bundled_validator(tmp_path: Path) -> None:
+    installed = run_script("install.sh", tmp_path, "--hermes")
+    assert installed.returncode == 0, installed.stderr
+
+    wrapper = tmp_path / "hermes" / "skills" / "saga-lint" / "scripts" / "run.sh"
+    clean = subprocess.run(
+        [str(wrapper), str(ROOT / "examples" / "minimal")],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert clean.returncode == 0, clean.stderr
+    assert clean.stdout == f"Saga spine: {ROOT / 'examples' / 'minimal' / '.planning'}\n"
+
+    findings = subprocess.run(
+        [str(wrapper), str(ROOT / "tests" / "fixtures" / "saga_lint" / "invalid")],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert findings.returncode == 1, findings.stderr
+    assert "REQ_DUPLICATE" in findings.stdout
+    assert "LINK_LOCAL_MISSING" in findings.stdout
+
+    missing = subprocess.run(
+        [str(wrapper), str(tmp_path / "no-saga-spine")],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert missing.returncode == 2, missing.stderr
+    assert "SPINE_NOT_FOUND" in missing.stdout
+
+    as_json = subprocess.run(
+        [str(wrapper), str(ROOT / "examples" / "minimal"), "--format", "json"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert as_json.returncode == 0, as_json.stderr
+    assert json.loads(as_json.stdout)["schema_version"] == "1.0"
 
 
 def test_install_refuses_to_overwrite_foreign_entry(tmp_path: Path) -> None:

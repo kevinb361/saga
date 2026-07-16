@@ -20,6 +20,7 @@ No phase engine. No hidden database. No generated exhaust trail. The repository 
 | preserve observable behavior | `/saga-spec` | `.planning/specs/<domain>/spec.md` |
 | run a bounded sequence of slices | `/saga-loop` | updated records plus close-out evidence |
 | run an independent quality review | `/saga-audit` | `.planning/AUDIT.md` |
+| inspect Saga spine structure without mutation | `/saga-lint` | human or deterministic JSON findings |
 
 ## How it works
 
@@ -79,6 +80,8 @@ bin/saga-lint --format json examples/minimal
 ```
 
 `saga-lint` checks requirement IDs, markers and dependencies; structural traceability coverage; roadmap/milestone consistency; required STATE frontmatter; and local Markdown links in the canonical spine. It is read-only and does not judge evidence quality or replace `/saga-verify`.
+
+Installed agents can invoke the same bundled validator through `/saga-lint [PATH] [--format human|json]`; the skill resolves the checkout-relative executable and preserves its exit semantics.
 
 JSON output uses deterministic schema version `1.0` and retains stable finding codes, paths, and line numbers. Exit codes: `0` clean, `1` findings, `2` invocation or parser failure. A missing Saga spine is an invocation failure: it retains the structured `SPINE_NOT_FOUND` finding and exits `2`.
 

@@ -39,6 +39,8 @@ CLAUDE_HOME=/path/to/claude-home ./install.sh --claude
 
 Restart or begin a new agent session after installation so its skill index is rebuilt.
 
+The installed `/saga-lint` skill carries a portable `scripts/run.sh` wrapper. It resolves the validator from the source checkout even when invoked through an agent-home symlink; no global `saga-lint` binary is required.
+
 ## Uninstall
 
 ```bash
@@ -68,6 +70,6 @@ The statusline is read-only. Outside a project with Saga state, milestone output
 ```bash
 for home in "$HOME/.claude" "$HOME/.codex" "$HOME/.hermes"; do
   printf '%s: ' "$home"
-  test -L "$home/skills/saga-next" && echo installed || echo absent
+  test -L "$home/skills/saga-next" && test -x "$home/skills/saga-lint/scripts/run.sh" && echo installed || echo absent
 done
 ```
