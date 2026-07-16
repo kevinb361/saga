@@ -1,0 +1,29 @@
+---
+name: saga-loop
+description: "Session-driven loop driver for saga-next. Runs slices until the milestone drains or an escalation occurs. One consent up front, no cron, no background daemon."
+category: "saga"
+disable-model-invocation: true
+argument-hint: "[--dry-run | --max N | --milestone X.Y]"
+---
+
+# /saga-loop
+
+Inline loop driver for `/saga-next`. You say "go" once, it cranks through slices until the milestone drains or it hits something that needs you. No cron, no background daemon, no wasted cycles when there's no work.
+
+This skill runs `/saga-next`'s process inline — it executes slices directly in the same session context, not in a fresh subagent. Each iteration re-reads files of record from disk for reliability. Long milestones (>10 slices) belong on kanban cards (true isolation), not this loop.
+
+## Process
+
+1. **Pre-flight.** Read STATE.md via `/saga-state resume`, then ROADMAP.md, REQUIREMENTS.md, RETROSPECTIVE.md directly. If no saga spine exists, report and stop. Check for stale active work: if STATE.md has an escalation block or incomplete active item from a prior session, note it in the contract.
+
+2. **Present the loop contract.** Show milestone, open requirement count, retro lessons loaded (last 5), max iterations (default 10), stop conditions, and any stale active work found. Wait for explicit operator confirmation ("go" or a narrowed target). Do not proceed without it. See `reference.md` for the contract template.
+
+3. **Loop.** For each iteration: re-read STATE.md and REQUIREMENTS.md from disk, inject the last 5 retro entries, then execute the `/saga-next` process inline (same session, same context). Before executing, disclose the slice risk level — if live-mutation or destructive, STOP and wait for explicit approval even though the loop is running. Track progress as `[N/M] ✓ <slice> — <risk>`. Stop on: escalation after 2 gate failures, live-mutation/destructive without approval, frontier-shaped work, no remaining slices, max iterations reached, or any termination condition in `reference.md`.
+
+4. **Close-out (automatic on a clean drain).** If — and only if — the loop terminated by draining the milestone with zero escalations or risk-stops, run the close-out chain instead of handing the operator a command list: `/saga-verify` → **scope the flip gate to the ACTIVE milestone**: if every REQ _tagged to the active milestone_ is PROVEN, flip the ROADMAP marker 🚧→✅ and run a `/saga-state` reconcile (Current Position, `last_activity`, active-milestone pointer) → `/saga-audit --milestone <current>` → report one verdict. **The gate counts ONLY the active milestone's own REQs** — an OPEN/ASSERTED req belonging to a _different_ milestone (verify does a full-tree sweep, so its output will list them) NEVER blocks this milestone's flip. Match on each req's `(milestone: …)` tag; ignore the rest. **Verify + audit are the independent-check stage: they MUST run on a frontier model that did NOT execute these slices** — fresh eyes are the whole point. If this loop executed slices on a non-frontier (deep/local) model, do NOT self-verify or self-audit; delegate to the frontier auditor in `.planning/config.json` `close_out_auditor` (e.g. `claude -p`). Invoke it as ONE synchronous foreground call with a GENEROUS timeout (`timeout 1200 … > .planning/.close-out-auditor.log 2>&1`) — a full audit on a large project takes minutes, and the ~180s default terminal timeout is the trap that makes it look "hung"; do NOT background it, poll with sleeps, or re-launch. **FAIL CLOSED:** if it exits non-zero or does not freshly write BOTH `TRACEABILITY.md` AND `AUDIT.md`, STOP and report — **NEVER run `/saga-verify` or `/saga-audit` yourself as a fallback** (a non-frontier model self-verifying is the integrity hole this stage exists to close). On success, READ the artifacts and flip only if every ACTIVE-milestone REQ is PROVEN. **Flip robustly:** read the milestone's current ROADMAP line, replace its actual `🚧` with `✅`, then re-read to confirm — a pre-composed exact-match patch silently fails and leaves the milestone done-but-unflipped. If `close_out_auditor` is unset, emit a paste handoff and stop before the flip. The mechanical ROADMAP/STATE edits may run inline (model-agnostic) but only AFTER a frontier verify shows the active milestone's REQs all PROVEN. If any ACTIVE-milestone REQ is ASSERTED/OPEN, STOP the close-out and report the gap (other milestones' open reqs are noted, not blocking). If the loop stopped for ANY error reason (escalation, frontier-shaped work, risk checkpoint, stall, corruption, `--max`), do NOT close out — report the stop reason + summary only. The single action left for the operator is the finalize+commit gate. See `reference.md` for the sequence, model policy, and verdict template.
+
+## Completion criterion
+
+DONE when the loop has either (a) drained all active slices AND run the close-out chain — `/saga-verify`, then ROADMAP flip + `/saga-state` reconcile if all REQ PROVEN, then `/saga-audit` — reporting a single verdict, or (b) stopped at a gate requiring operator intervention with NO close-out run (milestone not done). In both cases: the loop contract was shown and confirmed before any execution; each slice was executed inline using the `/saga-next` process (not delegated to a fresh subagent); the last 5 retro entries were injected into every iteration; STATE.md and REQUIREMENTS.md were re-read between iterations; git dirty state was reported.
+
+See `reference.md` for the loop contract template, retro injection format, termination conditions, arguments, anti-patterns, and relationship to other tools.

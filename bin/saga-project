@@ -1,0 +1,584 @@
+#!/usr/bin/env python3
+"""saga-project: project a saga milestone's open REQs onto a kanban card DAG.
+
+Parses .planning/REQUIREMENTS.md, extracts OPEN reqs of a given milestone,
+resolves inter-slice dependencies per decision 0005 grammar, validates fail-closed,
+and either prints the DAG as JSON (--dry-run, default) or creates kanban cards
+(--execute).
+
+Stdlib only. No external dependencies.
+"""
+
+import argparse
+import json
+import os
+import re
+from datetime import date
+import subprocess
+import sys
+from collections import defaultdict
+
+
+# Regex for a REQ line:
+#   - [ ] **REQ-NNN** — title ... (milestone: slug) (depends: ...)
+#   - [x] or [/] for done
+REQ_RE = re.compile(
+    r'^- \[(?P<marker>[ x/])\] '
+    r'\*\*REQ-(?P<id>\d{3})\*\* — (?P<rest>.+)$',
+    re.IGNORECASE,
+)
+
+MILESTONE_RE = re.compile(r'\(milestone:\s*(.+?)\)', re.IGNORECASE)
+DEPENDS_RE = re.compile(r'\(depends:\s*(.+?)\)', re.IGNORECASE)
+NOT_BEFORE_RE = re.compile(r'\(not-before:\s*(.+?)\)', re.IGNORECASE)
+
+
+def parse_requirements(path):
+    """Parse REQUIREMENTS.md and return a list of req dicts.
+
+    Each dict: {id, title, marker, milestone, depends_raw, line_num}
+    depends_raw is the raw string from the (depends: ...) tag, or None.
+    """
+    reqs = []
+    with open(path) as f:
+        for line_num, line in enumerate(f, 1):
+            m = REQ_RE.match(line.rstrip('\n'))
+            if not m:
+                continue
+            marker = m.group('marker')
+            req_id = f"REQ-{m.group('id')}"
+            # Tags may appear anywhere after the title (done lines carry
+            # (evidence: ...) etc.) — search the whole remainder, and cut the
+            # title at the earliest recognized tag.
+            tags = m.group('rest')
+            starts = [mt.start() for mt in (
+                MILESTONE_RE.search(tags), DEPENDS_RE.search(tags),
+                NOT_BEFORE_RE.search(tags)) if mt]
+            title = (tags[:min(starts)] if starts else tags).strip()
+
+            milestone_m = MILESTONE_RE.search(tags)
+            milestone = milestone_m.group(1).strip() if milestone_m else None
+
+            depends_m = DEPENDS_RE.search(tags)
+            depends_raw = depends_m.group(1).strip() if depends_m else None
+
+            not_before_m = NOT_BEFORE_RE.search(tags)
+            not_before = not_before_m.group(1).strip() if not_before_m else None
+
+            reqs.append({
+                'id': req_id,
+                'title': title,
+                'marker': marker,
+                'milestone': milestone,
+                'depends_raw': depends_raw,
+                'not_before': not_before,
+                'line_num': line_num,
+            })
+    return reqs
+
+
+def is_done(marker):
+    """A req is done when its marker is [x] or [/]."""
+    return marker in ('x', '/')
+
+
+def parse_depends(depends_raw):
+    """Parse a depends_raw string into a list of REQ IDs or 'none'.
+
+    Returns:
+      - ['none'] if the raw is 'none'
+      - ['REQ-041', 'REQ-043'] for comma-separated IDs
+      - [] for empty/whitespace
+    """
+    if not depends_raw:
+        return []
+    stripped = depends_raw.strip()
+    if stripped.lower() == 'none':
+        return ['none']
+    return [tid.strip() for tid in stripped.split(',') if tid.strip()]
+
+
+def validate_and_resolve(reqs, milestone):
+    """Validate fail-closed and resolve dependencies for the given milestone.
+
+    Returns a list of card dicts: {req, title, depends}
+    where depends is a list of REQ IDs that are actual gates (after dropping
+    DONE deps).
+
+    Raises SystemExit on any validation failure.
+    """
+    # Filter to the milestone's reqs
+    milestone_reqs = [r for r in reqs if r['milestone'] == milestone]
+    all_ids = {r['id'] for r in reqs}
+    milestone_ids = {r['id'] for r in milestone_reqs}
+
+    # Build lookup: id -> req
+    req_map = {r['id']: r for r in reqs}
+
+    # Separate OPEN and DONE for this milestone
+    open_reqs = [r for r in milestone_reqs if not is_done(r['marker'])]
+    done_ids = {r['id'] for r in reqs if is_done(r['marker'])}
+
+    if not open_reqs:
+        print(f"No OPEN requirements found for milestone '{milestone}'.", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve dependencies for each OPEN req
+    # Track: for implicit serial, the "nearest preceding OPEN req in file order"
+    prev_open = None
+    cards = []
+
+    for req in open_reqs:
+        deps_raw = parse_depends(req['depends_raw'])
+
+        # Rule 5: contradiction — (depends: none) plus listed IDs
+        if deps_raw and 'none' in [d.lower() for d in deps_raw]:
+            # Check if there are also actual REQ IDs
+            non_none = [d for d in deps_raw if d.lower() != 'none']
+            if non_none:
+                print(
+                    f"ERROR: {req['id']} line {req['line_num']}: contradiction — "
+                    f"(depends: none) cannot coexist with other IDs ({', '.join(non_none)})",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+        if not deps_raw:
+            # No tag: implicit serial — depends on nearest preceding OPEN req
+            if prev_open is None:
+                # First OPEN req with no tag = root by position
+                resolved_deps = []
+            else:
+                resolved_deps = [prev_open['id']]
+        elif 'none' in [d.lower() for d in deps_raw]:
+            # (depends: none) = explicit root
+            resolved_deps = []
+        else:
+            # Explicit deps — validate each
+            resolved_deps = []
+            for dep_id in deps_raw:
+                # Rule 1: unknown REQ-ID
+                if dep_id not in all_ids:
+                    print(
+                        f"ERROR: {req['id']} line {req['line_num']}: "
+                        f"unknown dependency {dep_id} (not found in REQUIREMENTS.md)",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+                # Rule 2: self-dependency
+                if dep_id == req['id']:
+                    print(
+                        f"ERROR: {req['id']} line {req['line_num']}: "
+                        f"self-dependency is not allowed",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+                # Rule 3: dep on DONE req → satisfied, drop edge
+                if dep_id in done_ids:
+                    continue
+
+                # Rule 4: cross-milestone OPEN dep → error
+                dep_req = req_map[dep_id]
+                if dep_req['milestone'] != milestone and dep_id not in done_ids:
+                    print(
+                        f"ERROR: {req['id']} line {req['line_num']}: "
+                        f"cross-milestone dependency on OPEN req {dep_id} "
+                        f"(milestone '{dep_req['milestone']}') — "
+                        f"only DONE cross-milestone deps are allowed",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+                # Same-milestone OPEN dep — keep as a gate
+                if dep_id in milestone_ids:
+                    resolved_deps.append(dep_id)
+
+        cards.append({
+            'req': req['id'],
+            'title': req['title'],
+            'depends': resolved_deps,
+        })
+        prev_open = req
+
+    # Rule 2: cycle detection via topological sort (Kahn's algorithm)
+    graph = defaultdict(list)  # dep -> [dependents]
+    in_degree = {c['req']: 0 for c in cards}
+    card_map = {c['req']: c for c in cards}
+
+    for c in cards:
+        for dep in c['depends']:
+            if dep in card_map:
+                graph[dep].append(c['req'])
+                in_degree[c['req']] += 1
+
+    queue = [nid for nid, deg in in_degree.items() if deg == 0]
+    sorted_order = []
+    while queue:
+        queue.sort()  # deterministic
+        node = queue.pop(0)
+        sorted_order.append(node)
+        for neighbor in graph[node]:
+            in_degree[neighbor] -= 1
+            if in_degree[neighbor] == 0:
+                queue.append(neighbor)
+
+    if len(sorted_order) != len(cards):
+        cycle_nodes = [nid for nid, deg in in_degree.items() if deg > 0]
+        print(
+            f"ERROR: dependency cycle detected among {', '.join(sorted(cycle_nodes))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return cards
+
+
+def apply_not_before(cards, reqs, today=None):
+    """Defer time-gated cards and everything transitively depending on them.
+
+    A req tagged (not-before: YYYY-MM-DD) with a date after ``today`` is
+    excluded from projection, along with all transitive dependents (they
+    could not run before their gate anyway). Malformed dates fail closed.
+    Returns (eligible_cards, deferred) where deferred is a list of
+    {req, not_before, reason} dicts.
+    """
+    today = today or date.today()
+    nb = {}
+    for r in reqs:
+        if r.get('not_before'):
+            try:
+                nb[r['id']] = date.fromisoformat(r['not_before'])
+            except ValueError:
+                print(
+                    f"ERROR: {r['id']} line {r['line_num']}: invalid "
+                    f"(not-before: {r['not_before']}) — expected YYYY-MM-DD",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+    deferred = {}
+    for c in cards:
+        gate = nb.get(c['req'])
+        if gate and gate > today:
+            deferred[c['req']] = {
+                'req': c['req'], 'not_before': gate.isoformat(),
+                'reason': 'time-gated',
+            }
+    # transitive closure over dependents
+    changed = True
+    while changed:
+        changed = False
+        for c in cards:
+            if c['req'] in deferred:
+                continue
+            blocking = [d for d in c['depends'] if d in deferred]
+            if blocking:
+                deferred[c['req']] = {
+                    'req': c['req'], 'not_before': None,
+                    'reason': f"depends on deferred {', '.join(sorted(blocking))}",
+                }
+                changed = True
+
+    eligible = [c for c in cards if c['req'] not in deferred]
+    return eligible, sorted(deferred.values(), key=lambda d: d['req'])
+
+
+def dry_run(cards, milestone, deferred=None):
+    """Print the DAG as JSON to stdout, including the convergence card."""
+    deferred = deferred or []
+    output = {'cards': cards, 'deferred': deferred}
+    if not deferred:
+        # convergence (close-out) only when the projection covers ALL open
+        # reqs — a partial (time-gated) projection must not close the milestone
+        sinks = find_sinks(cards)
+        output['convergence'] = {
+            'req': '__convergence__',
+            'title': f'convergence close-out for {milestone}',
+            'depends': [s['req'] for s in sinks],
+            'body': build_convergence_body(milestone),
+        }
+    print(json.dumps(output, indent=2))
+
+
+def find_sinks(cards):
+    """Find sink cards: cards that no other card depends on.
+
+    These are the leaves of the DAG — once all sinks complete,
+    the entire DAG is done.
+    """
+    depended_on = set()
+    for card in cards:
+        for dep in card['depends']:
+            depended_on.add(dep)
+
+    return [c for c in cards if c['req'] not in depended_on]
+
+
+def build_convergence_body(milestone, task_ids=None):
+    """Build the body for a convergence close-out card.
+
+    Instructs the worker to run the saga close-out chain per
+    saga-loop step 4 semantics with the fail-closed auditor contract,
+    including checkbox-flip instructions for completed REQs (REQ-036).
+
+    Args:
+        milestone: milestone slug
+        task_ids: optional dict mapping req_id -> task_id for card-ref evidence
+    """
+    body = (
+        f"Convergence close-out for milestone {milestone}.\n\n"
+        f"Run the saga close-out chain:\n"
+        f"1. /saga-verify\n"
+    )
+
+    # REQ-036: checkbox-flip instructions between verify and ROADMAP flip
+    if task_ids:
+        # Build per-REQ flip instructions with card refs (skip convergence itself)
+        flip_lines = []
+        for req_id, card_id in sorted(task_ids.items()):
+            if req_id == '__convergence__':
+                continue
+            flip_lines.append(
+                f"   - Read the line for {req_id} in .planning/REQUIREMENTS.md, "
+                f"replace `[ ]` with `[x]`, and append card-ref evidence: "
+                f"(card: {card_id}). Use read-then-replace on the actual line "
+                f"(never a pre-composed exact-match patch — REQ-023 pattern)."
+            )
+        if flip_lines:
+            body += (
+                "2. After /saga-verify shows the milestone's REQs PROVEN, "
+                "flip each completed REQ's checkbox in .planning/REQUIREMENTS.md:\n"
+            )
+            body += "\n".join(flip_lines)
+            body += (
+                "\n"
+                "   Read the current line first, then replace — never assume exact whitespace.\n"
+            )
+        else:
+            body += (
+                "2. After /saga-verify shows the milestone's REQs PROVEN, "
+                "flip each completed REQ's checkbox `[ ]` -> `[x]` in "
+                ".planning/REQUIREMENTS.md with card-ref evidence notes, "
+                "using read-then-replace on the actual line "
+                "(never a pre-composed exact-match patch — REQ-023 pattern).\n"
+            )
+    else:
+        body += (
+            "2. After /saga-verify shows the milestone's REQs PROVEN, "
+            "flip each completed REQ's checkbox `[ ]` -> `[x]` in "
+            ".planning/REQUIREMENTS.md with card-ref evidence notes, "
+            "using read-then-replace on the actual line "
+            "(never a pre-composed exact-match patch — REQ-023 pattern).\n"
+        )
+
+    body += (
+        f"3. Milestone-scoped flip gate: if every REQ tagged to the active milestone "
+        f"is PROVEN, flip the ROADMAP marker 🚧→✅ and run /saga-state reconcile.\n"
+        f"4. /saga-audit --milestone {milestone}\n"
+        f"5. Report one verdict.\n\n"
+        f"Frontier-gated verify + audit: these MUST run on a frontier model that "
+        f"did NOT execute these slices. If this worker is non-frontier, delegate to "
+        f"the frontier auditor in .planning/config.json close_out_auditor "
+        f"(e.g. `claude -p`). Invoke as ONE synchronous foreground call with "
+        f"a generous timeout (`timeout 1200 ... > .planning/.close-out-auditor.log 2>&1`).\n\n"
+        f"FAIL CLOSED: if the auditor exits non-zero or does not freshly write "
+        f"BOTH TRACEABILITY.md AND AUDIT.md, STOP and report — NEVER run "
+        f"/saga-verify or /saga-audit yourself as a fallback (a non-frontier model "
+        f"self-verifying is the integrity hole this gate exists to close).\n\n"
+        f"Single-flighted: this convergence card is the ONLY close-out path "
+        f"for the projected milestone. Do not race other workers.\n"
+    )
+
+    return body
+
+
+def execute(cards, milestone, repo, _run_cmd=None, with_convergence=True, assignee='default'):
+    """Create kanban cards for each card in the DAG.
+
+    Creates cards in topological order with --parent inline so parents
+    exist before children. Every card gets --workspace worktree:<repo>
+    for worktree isolation. If more than 3 roots exist, surplus roots
+    are chained serially (file order) to knee-cap the dispatch.
+
+    After all slice cards, creates ONE convergence card parented on
+    all sink cards (leaves of the DAG) that fires the frontier-gated
+    close-out chain (fail-closed auditor contract in its body).
+
+    Args:
+        cards: list of card dicts from validate_and_resolve
+        milestone: milestone slug
+        repo: absolute path to the target git repo for worktree workspace
+        _run_cmd: callable for subprocess (defaults to subprocess.run;
+                  inject a mock in tests)
+
+    Returns a list of created task IDs.
+    """
+    if _run_cmd is None:
+        _run_cmd = subprocess.run
+
+    task_ids = {}  # req_id -> task_id
+
+    # Knee-cap: if >3 roots, chain surplus serially (file order).
+    # roots[0], roots[1], roots[2] are free; roots[3] depends on roots[2],
+    # roots[4] on roots[3], etc.
+    roots = [c for c in cards if not c['depends']]
+    if len(roots) > 3:
+        for i in range(3, len(roots)):
+            roots[i]['depends'].append(roots[i - 1]['req'])
+
+    # Topological sort (Kahn's) to get creation order — parents before children
+    graph = defaultdict(list)
+    in_degree = {c['req']: 0 for c in cards}
+    card_map = {c['req']: c for c in cards}
+
+    for c in cards:
+        for dep in c['depends']:
+            if dep in card_map:
+                graph[dep].append(c['req'])
+                in_degree[c['req']] += 1
+
+    queue = sorted([nid for nid, deg in in_degree.items() if deg == 0])
+    creation_order = []
+
+    while queue:
+        node = queue.pop(0)
+        creation_order.append(node)
+        for neighbor in sorted(graph[node]):
+            in_degree[neighbor] -= 1
+            if in_degree[neighbor] == 0:
+                queue.append(neighbor)
+                queue.sort()
+
+    # Create each card in order with --parent inline
+    for req_id in creation_order:
+        card = card_map[req_id]
+        cmd = [
+            'hermes', 'kanban', 'create',
+            '--assignee', assignee,
+            '--skill', 'saga-next',
+            '--workspace', f'worktree:{repo}',
+            '--idempotency-key', f'saga:{repo}:{milestone}:{card["req"]}',
+            '--json',
+            f"{card['req']}: {card['title']}",
+        ]
+        for dep in card['depends']:
+            if dep in task_ids:
+                cmd.extend(['--parent', task_ids[dep]])
+
+        result = _run_cmd(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"ERROR creating card for {card['req']}: {result.stderr}", file=sys.stderr)
+            sys.exit(1)
+
+        data = json.loads(result.stdout)
+        task_id = data.get('id') or data.get('task_id')
+        task_ids[card['req']] = task_id
+
+    if not with_convergence:
+        print(
+            "NOTE: partial projection (deferred reqs) — no convergence card; "
+            "re-project after the time gates pass.",
+            file=sys.stderr,
+        )
+        return list(task_ids.values())
+    # Create ONE convergence card as child of all sink cards (leaves of the
+    # post-knee-cap DAG). Its body carries the fail-closed auditor contract.
+    sinks = find_sinks(cards)
+    cmd = [
+        'hermes', 'kanban', 'create',
+        '--assignee', assignee,
+        '--skill', 'saga-next',
+        '--workspace', f'worktree:{repo}',
+        '--idempotency-key', f'saga:{repo}:{milestone}:__convergence__',
+        '--json',
+        '--body', build_convergence_body(milestone, task_ids),
+        f'convergence close-out for {milestone}',
+    ]
+    for sink in sinks:
+        cmd.extend(['--parent', task_ids[sink['req']]])
+
+    result = _run_cmd(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"ERROR creating convergence card: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
+
+    conv_data = json.loads(result.stdout)
+    task_ids['__convergence__'] = conv_data.get('id') or conv_data.get('task_id')
+
+    print(json.dumps({'cards': cards, 'task_ids': task_ids}, indent=2))
+    return list(task_ids.values())
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Project a saga milestone onto a kanban card DAG.',
+    )
+    parser.add_argument(
+        '--milestone',
+        required=True,
+        help='Milestone slug (e.g. v1.0-concurrent-execution)',
+    )
+    parser.add_argument(
+        '--requirements',
+        default='.planning/REQUIREMENTS.md',
+        help='Path to REQUIREMENTS.md (default: .planning/REQUIREMENTS.md)',
+    )
+    parser.add_argument(
+        '--dry-run',
+        action='store_true',
+        default=True,
+        help='Print DAG as JSON without creating cards (default)',
+    )
+    parser.add_argument(
+        '--execute',
+        action='store_true',
+        default=False,
+        help='Create kanban cards via `hermes kanban create`',
+    )
+    parser.add_argument(
+        '--assignee',
+        default='default',
+        help='Kanban assignee profile for created cards (unassigned cards never dispatch)',
+    )
+    parser.add_argument(
+        '--repo',
+        default=None,
+        help='Absolute path to the target git repo (required for --execute; used for worktree workspace)',
+    )
+    args = parser.parse_args()
+
+    if not os.path.isfile(args.requirements):
+        print(f"ERROR: {args.requirements} not found", file=sys.stderr)
+        sys.exit(1)
+
+    reqs = parse_requirements(args.requirements)
+    cards = validate_and_resolve(reqs, args.milestone)
+    cards, deferred = apply_not_before(cards, reqs)
+    if not cards:
+        print(
+            f"All open requirements for '{args.milestone}' are time-gated "
+            f"(earliest not-before: "
+            f"{min((d['not_before'] for d in deferred if d['not_before']), default='?')}).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.execute:
+        if not args.repo:
+            print("ERROR: --repo is required for --execute", file=sys.stderr)
+            sys.exit(1)
+        if not os.path.isabs(args.repo):
+            print("ERROR: --repo must be an absolute path", file=sys.stderr)
+            sys.exit(1)
+        if deferred:
+            for d in deferred:
+                print(f"DEFERRED: {d['req']} — {d['reason']}", file=sys.stderr)
+        execute(cards, args.milestone, args.repo, with_convergence=not deferred, assignee=args.assignee)
+    else:
+        dry_run(cards, args.milestone, deferred)
+
+
+if __name__ == '__main__':
+    main()
