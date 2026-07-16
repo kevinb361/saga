@@ -21,13 +21,13 @@ are the most cross-referenced spine files, so preserve their existing line forma
 ### add
 
 1. Insert a new milestone or phase line at the top of `## Milestones` (newest first), matching the existing
-   format: `🚧 **<vX.Y Name>** — planning <date> (Phases N–M; <K> REQs; <one-line scope>; <SAFE-NN invariant if any>)`.
+   format: `- 🚧 **<vX.Y Name>** — planning <date> (Phases N–M; <K> REQs; <one-line scope>; <SAFE-NN invariant if any>)`.
    For a phase under the active milestone, match the project's phase-line convention
    (`**Phase NNN — Title** (REQ-01..03, SAFE-NN): <scope>`).
 
 ### done
 
-1. Flip the milestone's leading emoji `🚧 → ✅`, change `planning` to `shipped <date>`, and record the
+1. Flip the milestone's leading status `- 🚧 → - ✅`, change `planning` to `shipped <date>`, and record the
    `X/Y REQs` count. If the project archives shipped milestones, add the trailing
    `— \`milestones/vX.Y-ROADMAP.md\`` link; do not move history.
 

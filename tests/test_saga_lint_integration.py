@@ -1,9 +1,11 @@
 """End-to-end saga-lint checks for the public example and durable fixtures."""
 
 import ast
+import io
 import json
 from pathlib import Path
 import subprocess
+import tarfile
 
 
 ROOT = Path(__file__).parents[1]
@@ -163,3 +165,44 @@ def test_close_out_auditor_log_is_gitignored():
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ".planning/.close-out-auditor.log"
+
+
+def test_archive_policy_excludes_only_the_private_root_spine():
+    attributes = (ROOT / ".gitattributes").read_text().splitlines()
+    assert "/.planning export-ignore" in attributes
+    assert ".planning export-ignore" not in attributes
+    if not (ROOT / ".git").exists():
+        return
+
+    result = subprocess.run(
+        ["git", "archive", "--worktree-attributes", "--format=tar", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr.decode()
+    with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+        names = set(archive.getnames())
+    assert not any(name == ".planning" or name.startswith(".planning/") for name in names)
+    assert "examples/minimal/.planning/STATE.md" in names
+    assert "tests/fixtures/saga_lint/valid/.planning/STATE.md" in names
+    assert "tests/fixtures/saga_lint/invalid/.planning/STATE.md" in names
+
+
+def test_state_reference_statuses_match_validator_contract():
+    tree = ast.parse(SCRIPT.read_text())
+    validator_statuses = None
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == "STATE_STATUSES"
+            for target in node.targets
+        ):
+            validator_statuses = set(ast.literal_eval(node.value))
+            break
+    assert validator_statuses is not None
+
+    reference = (ROOT / "skills/saga/saga-state/reference.md").read_text().splitlines()
+    status_line = next(line for line in reference if line.startswith("status: <"))
+    documented_statuses = set(status_line.removeprefix("status: <").removesuffix(">").split(" | "))
+    assert documented_statuses == validator_statuses

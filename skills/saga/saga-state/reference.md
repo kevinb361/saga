@@ -7,7 +7,7 @@
 saga_state_version: 1.0
 milestone: <slug>
 milestone_name: <short name>
-status: <planning | ready_to_execute | in_progress | blocked | shipped>
+status: <active | paused | blocked | complete | closed | idle>
 stopped_at: <where work paused>
 last_updated: "<ISO 8601, e.g. 2026-06-24T00:00:00.000Z>"
 last_activity: <date -- one-line what just happened>

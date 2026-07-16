@@ -1,4 +1,4 @@
-.planning export-ignore
+/.planning export-ignore
 .gitea export-ignore
 docs/PUBLISHING.md export-ignore
 .worktrees export-ignore
