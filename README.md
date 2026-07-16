@@ -64,8 +64,25 @@ See [docs/INSTALL.md](docs/INSTALL.md) for agent-specific details and the option
 
 ## Tools
 
+- `bin/saga-lint` — read-only structural health check for a Saga spine.
 - `bin/saga-project` — projects open requirements into a dependency-aware Hermes Kanban DAG. Dry-run JSON is the default; `--execute` creates worktree-isolated cards and one convergence card.
 - `bin/saga-statusline.js` — optional Claude Code statusline showing model, project/worktree, context use, and the nearest Saga milestone.
+
+## Project health
+
+Run the human-readable check from a project root or point it at another project or its `.planning` directory:
+
+```bash
+bin/saga-lint
+bin/saga-lint examples/minimal
+bin/saga-lint --format json examples/minimal
+```
+
+`saga-lint` checks requirement IDs, markers and dependencies; structural traceability coverage; roadmap/milestone consistency; required STATE frontmatter; and local Markdown links in the canonical spine. It is read-only and does not judge evidence quality or replace `/saga-verify`.
+
+JSON output uses deterministic schema version `1.0` and retains stable finding codes, paths, and line numbers. Exit codes: `0` clean, `1` findings, `2` invocation or parser failure. A missing Saga spine is an invocation failure: it retains the structured `SPINE_NOT_FOUND` finding and exits `2`.
+
+The [minimal worked project](examples/minimal) demonstrates proven, open, and decision-backed records. Dedicated positive and negative fixtures are exercised by the test suite, so the canonical `make ci` gate checks both the example and known failure behavior.
 
 ## Development
 

@@ -1,0 +1,106 @@
+[
+  {
+    "name": "spine-not-found",
+    "files": null,
+    "expected_codes": [
+      "SPINE_NOT_FOUND"
+    ],
+    "expected_exit": 2
+  },
+  {
+    "name": "requirement-integrity",
+    "files": {
+      "STATE.md": "---\nsaga_state_version: 1.0\nmilestone: v1.0-test\nmilestone_name: Test\nstatus: active\nlast_updated: \"2026-01-01T00:00:00Z\"\nlast_activity: fixture\n\n# state\n",
+      "ROADMAP.md": "# roadmap\n\n## Milestones\n\n- \ud83d\udea7 **v1.0 Test** \u2014 fixture\n",
+      "REQUIREMENTS.md": "# requirements\n\n## Requirements\n\n- [ ] **REQ-AB** \u2014 malformed (milestone: v1.0-test) (depends: none)\n- [?] **REQ-001** \u2014 unsupported (milestone: v1.0-test) (depends: none)\n- [ ] **REQ-002** \u2014 first (milestone: v1.0-test) (depends: none)\n- [x] **REQ-002** \u2014 duplicate (milestone: v1.0-test) (depends: none)\n- [ ] **REQ-003** \u2014 contradictory unknown (milestone: v1.0-test) (depends: none, REQ-999)\n- [ ] **REQ-006** \u2014 unknown dependency (milestone: v1.0-test) (depends: REQ-999)\n- [ ] **REQ-004** \u2014 cycle a (milestone: v1.0-test) (depends: REQ-005)\n- [ ] **REQ-005** \u2014 cycle b (milestone: v1.0-test) (depends: REQ-004)\n",
+      "TRACEABILITY.md": "# traceability\n\n| Requirement | Description | Status | Evidence |\n|---|---|---|---|\n| REQ-002 | fixture | **OPEN** | fixture |\n| REQ-003 | fixture | **OPEN** | fixture |\n| REQ-004 | fixture | **OPEN** | fixture |\n| REQ-005 | fixture | **OPEN** | fixture |\n| REQ-006 | fixture | **OPEN** | fixture |\n"
+    },
+    "expected_codes": [
+      "REQ_ID_MALFORMED",
+      "REQ_MARKER_UNSUPPORTED",
+      "REQ_DUPLICATE",
+      "REQ_DEP_CONTRADICTION",
+      "REQ_DEP_UNKNOWN",
+      "REQ_DEP_CYCLE"
+    ]
+  },
+  {
+    "name": "traceability-integrity",
+    "files": {
+      "STATE.md": "---\nsaga_state_version: 1.0\nmilestone: v1.0-test\nmilestone_name: Test\nstatus: active\nlast_updated: \"2026-01-01T00:00:00Z\"\nlast_activity: fixture\n\n# state\n",
+      "ROADMAP.md": "# roadmap\n\n## Milestones\n\n- \ud83d\udea7 **v1.0 Test** \u2014 fixture\n",
+      "REQUIREMENTS.md": "# requirements\n\n## Requirements\n\n- [x] **REQ-001** \u2014 done (milestone: v1.0-test) (depends: none)\n- [ ] **REQ-002** \u2014 duplicate trace (milestone: v1.0-test) (depends: none)\n- [ ] **REQ-003** \u2014 malformed status (milestone: v1.0-test) (depends: none)\n- [ ] **REQ-004** \u2014 missing trace (milestone: v1.0-test) (depends: none)\n",
+      "TRACEABILITY.md": "# traceability\n\n| Requirement | Description | Status | Evidence |\n|---|---|---|---|\n| REQ-001 | fixture | **OPEN** | fixture |\n| REQ-002 | fixture | **OPEN** | fixture |\n| REQ-002 | fixture | **OPEN** | duplicate |\n| REQ-999 | fixture | **OPEN** | unknown |\n| REQ-003 | fixture | **DONE** | malformed |\n"
+    },
+    "expected_codes": [
+      "TRACE_DONE_OPEN",
+      "TRACE_REQ_DUPLICATE",
+      "TRACE_REQ_UNKNOWN",
+      "TRACE_STATUS_MALFORMED",
+      "TRACE_REQ_MISSING"
+    ]
+  },
+  {
+    "name": "roadmap-unknown-and-empty",
+    "files": {
+      "STATE.md": "---\nsaga_state_version: 1.0\nmilestone: v1.0-test\nmilestone_name: Test\nstatus: active\nlast_updated: \"2026-01-01T00:00:00Z\"\nlast_activity: fixture\n\n# state\n",
+      "ROADMAP.md": "# roadmap\n\n## Milestones\n\n- \ud83d\udea7 **v1.0 Test** \u2014 fixture\n",
+      "REQUIREMENTS.md": "# requirements\n\n## Requirements\n\n- [ ] **REQ-001** \u2014 unknown milestone (milestone: v9.0-missing) (depends: none)\n",
+      "TRACEABILITY.md": "# traceability\n\n| Requirement | Description | Status | Evidence |\n|---|---|---|---|\n| REQ-001 | fixture | **OPEN** | fixture |\n"
+    },
+    "expected_codes": [
+      "ROADMAP_MILESTONE_UNKNOWN",
+      "ROADMAP_ACTIVE_EMPTY"
+    ]
+  },
+  {
+    "name": "roadmap-shipped-open",
+    "files": {
+      "STATE.md": "---\nsaga_state_version: 1.0\nmilestone: v1.0-test\nmilestone_name: Test\nstatus: active\nlast_updated: \"2026-01-01T00:00:00Z\"\nlast_activity: fixture\n\n# state\n",
+      "ROADMAP.md": "# roadmap\n\n## Milestones\n\n- \u2705 **v1.0 Test** \u2014 fixture\n",
+      "REQUIREMENTS.md": "# requirements\n\n## Requirements\n\n- [ ] **REQ-001** \u2014 still open (milestone: v1.0-test) (depends: none)\n",
+      "TRACEABILITY.md": "# traceability\n\n| Requirement | Description | Status | Evidence |\n|---|---|---|---|\n| REQ-001 | fixture | **OPEN** | fixture |\n"
+    },
+    "expected_codes": [
+      "ROADMAP_SHIPPED_OPEN"
+    ]
+  },
+  {
+    "name": "state-frontmatter-missing",
+    "files": {
+      "STATE.md": "# state\n",
+      "ROADMAP.md": "# roadmap\n",
+      "REQUIREMENTS.md": "# requirements\n",
+      "TRACEABILITY.md": "# traceability\n\n| Requirement | Description | Status | Evidence |\n|---|---|---|---|\n"
+    },
+    "expected_codes": [
+      "STATE_FRONTMATTER_MISSING"
+    ]
+  },
+  {
+    "name": "state-frontmatter-invalid",
+    "files": {
+      "STATE.md": "---\nsaga_state_version: 2.0\nmilestone: v1.0-test\nmilestone_name: Test\nstatus: weird\nlast_updated: never\nlast_activity: fixture\n\n# state\n",
+      "ROADMAP.md": "# roadmap\n",
+      "REQUIREMENTS.md": "# requirements\n",
+      "TRACEABILITY.md": "# traceability\n\n| Requirement | Description | Status | Evidence |\n|---|---|---|---|\n"
+    },
+    "expected_codes": [
+      "STATE_FRONTMATTER_INVALID",
+      "STATE_FRONTMATTER_INVALID",
+      "STATE_FRONTMATTER_INVALID"
+    ]
+  },
+  {
+    "name": "local-link-missing",
+    "files": {
+      "STATE.md": "---\nsaga_state_version: 1.0\nmilestone: v1.0-test\nmilestone_name: Test\nstatus: active\nlast_updated: \"2026-01-01T00:00:00Z\"\nlast_activity: fixture\n\n# state\n\n[missing](missing.md)\n",
+      "ROADMAP.md": "# roadmap\n",
+      "REQUIREMENTS.md": "# requirements\n",
+      "TRACEABILITY.md": "# traceability\n\n| Requirement | Description | Status | Evidence |\n|---|---|---|---|\n"
+    },
+    "expected_codes": [
+      "LINK_LOCAL_MISSING"
+    ]
+  }
+]

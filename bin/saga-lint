@@ -1,0 +1,599 @@
+#!/usr/bin/env python3
+"""Read-only structural inspection entry point for Saga project spines."""
+
+import argparse
+from dataclasses import dataclass
+from datetime import datetime
+import json
+from pathlib import Path
+import re
+import sys
+from urllib.parse import unquote, urlsplit
+
+
+SPINE_FILES = ("STATE.md", "ROADMAP.md", "REQUIREMENTS.md", "TRACEABILITY.md")
+REQ_LINE_RE = re.compile(
+    r"^- \[(?P<marker>.)\] \*\*(?P<id>REQ-[^*]+)\*\* — (?P<rest>.+)$"
+)
+MILESTONE_RE = re.compile(r"\(milestone:\s*(.+?)\)", re.IGNORECASE)
+DEPENDS_RE = re.compile(r"\(depends:\s*(.+?)\)", re.IGNORECASE)
+ROADMAP_LINE_RE = re.compile(
+    r"^- (?P<marker>[✅🚧]) \*\*(?P<version>v\d+(?:\.\d+)+)"
+    r"(?:\s+(?P<name>[^*]+))?\*\*"
+)
+STATE_KEYS = (
+    "saga_state_version",
+    "milestone",
+    "milestone_name",
+    "status",
+    "last_updated",
+    "last_activity",
+)
+STATE_STATUSES = {"active", "paused", "blocked", "complete", "closed", "idle"}
+MARKDOWN_LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
+FINDING_CODES = frozenset(
+    {
+        "SPINE_NOT_FOUND",
+        "REQ_ID_MALFORMED",
+        "REQ_MARKER_UNSUPPORTED",
+        "REQ_DUPLICATE",
+        "REQ_DEP_CONTRADICTION",
+        "REQ_DEP_UNKNOWN",
+        "REQ_DEP_CYCLE",
+        "TRACE_REQ_UNKNOWN",
+        "TRACE_REQ_DUPLICATE",
+        "TRACE_STATUS_MALFORMED",
+        "TRACE_DONE_OPEN",
+        "TRACE_REQ_MISSING",
+        "ROADMAP_MILESTONE_UNKNOWN",
+        "ROADMAP_SHIPPED_OPEN",
+        "ROADMAP_ACTIVE_EMPTY",
+        "STATE_FRONTMATTER_MISSING",
+        "STATE_FRONTMATTER_INVALID",
+        "LINK_LOCAL_MISSING",
+    }
+)
+
+
+@dataclass(frozen=True)
+class Finding:
+    """One machine-addressable structural finding."""
+
+    code: str
+    severity: str
+    message: str
+    path: Path
+    line: int | None = None
+
+
+@dataclass(frozen=True)
+class Inspection:
+    """Resolved Saga spine plus findings produced without mutation."""
+
+    project_root: Path
+    planning_dir: Path
+    files: dict[str, Path]
+    findings: tuple[Finding, ...]
+    requirements: tuple["Requirement", ...] = ()
+    traceability: tuple["TraceRow", ...] = ()
+    milestones: tuple["RoadmapMilestone", ...] = ()
+    state: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class Requirement:
+    """One structurally valid requirement line."""
+
+    req_id: str
+    marker: str
+    milestone: str | None
+    dependencies: tuple[str, ...]
+    path: Path
+    line: int
+
+
+@dataclass(frozen=True)
+class TraceRow:
+    """One structural TRACEABILITY row."""
+
+    req_id: str
+    status: str
+    path: Path
+    line: int
+
+
+@dataclass(frozen=True)
+class RoadmapMilestone:
+    """One normalized ROADMAP milestone."""
+
+    marker: str
+    version: str
+    name: str
+    milestone_id: str
+    path: Path
+    line: int
+
+
+def _finding(code, message, path, line):
+    if code not in FINDING_CODES:
+        raise ValueError(f"Unregistered finding code: {code}")
+    return Finding(code=code, severity="error", message=message, path=path, line=line)
+
+
+def _find_cycle(requirements):
+    by_id = {requirement.req_id: requirement for requirement in requirements}
+    graph = {
+        req_id: tuple(dep for dep in requirement.dependencies if dep in by_id)
+        for req_id, requirement in by_id.items()
+    }
+    visiting = set()
+    visited = set()
+
+    def visit(req_id, trail):
+        if req_id in visiting:
+            return trail[trail.index(req_id):] + [req_id]
+        if req_id in visited:
+            return None
+        visiting.add(req_id)
+        for dependency in graph[req_id]:
+            cycle = visit(dependency, trail + [req_id])
+            if cycle:
+                return cycle
+        visiting.remove(req_id)
+        visited.add(req_id)
+        return None
+
+    for req_id in graph:
+        cycle = visit(req_id, [])
+        if cycle:
+            return cycle
+    return None
+
+
+def inspect_requirements(path):
+    """Parse requirement records and return valid rows plus structural findings."""
+    requirements = []
+    findings = []
+    seen = set()
+
+    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.startswith("- [") or "**REQ-" not in line:
+            continue
+        match = REQ_LINE_RE.match(line)
+        if not match:
+            findings.append(
+                _finding("REQ_ID_MALFORMED", "Malformed requirement line or ID", path, line_number)
+            )
+            continue
+
+        marker = match.group("marker")
+        req_id = match.group("id")
+        if not re.fullmatch(r"REQ-\d{3}", req_id):
+            findings.append(_finding("REQ_ID_MALFORMED", f"Malformed requirement ID: {req_id}", path, line_number))
+            continue
+        if marker not in {" ", "x", "/"}:
+            findings.append(
+                _finding("REQ_MARKER_UNSUPPORTED", f"Unsupported checkbox marker: {marker}", path, line_number)
+            )
+            continue
+        if req_id in seen:
+            findings.append(_finding("REQ_DUPLICATE", f"Duplicate requirement ID: {req_id}", path, line_number))
+            continue
+        seen.add(req_id)
+
+        structural = match.group("rest").split("(evidence:", 1)[0].split("(card:", 1)[0]
+        milestone_matches = list(MILESTONE_RE.finditer(structural))
+        milestone = milestone_matches[-1] if milestone_matches else None
+        declaration_tail = structural[milestone.end():] if milestone else ""
+        depends_tags = DEPENDS_RE.findall(declaration_tail)
+        dependencies = tuple(
+            dependency.strip()
+            for dependency in (depends_tags[-1].split(",") if depends_tags else ())
+            if dependency.strip()
+        )
+        lowered = {dependency.lower() for dependency in dependencies}
+        if "none" in lowered and len(dependencies) > 1:
+            findings.append(
+                _finding(
+                    "REQ_DEP_CONTRADICTION",
+                    f"{req_id} declares 'none' with other dependencies",
+                    path,
+                    line_number,
+                )
+            )
+            dependencies = ()
+        elif lowered == {"none"}:
+            dependencies = ()
+
+        requirements.append(
+            Requirement(
+                req_id=req_id,
+                marker=marker,
+                milestone=milestone.group(1).strip() if milestone else None,
+                dependencies=dependencies,
+                path=path,
+                line=line_number,
+            )
+        )
+
+    known_ids = {requirement.req_id for requirement in requirements}
+    for requirement in requirements:
+        for dependency in requirement.dependencies:
+            if dependency not in known_ids:
+                findings.append(
+                    _finding(
+                        "REQ_DEP_UNKNOWN",
+                        f"{requirement.req_id} depends on unknown {dependency}",
+                        path,
+                        requirement.line,
+                    )
+                )
+
+    cycle = _find_cycle(requirements)
+    if cycle:
+        first = min((next(req for req in requirements if req.req_id == req_id) for req_id in cycle), key=lambda req: req.line)
+        findings.append(
+            _finding("REQ_DEP_CYCLE", f"Requirement dependency cycle: {' -> '.join(cycle)}", path, first.line)
+        )
+
+    return tuple(requirements), tuple(findings)
+
+
+def inspect_traceability(path, requirements):
+    """Validate one-to-one structural coverage without judging evidence quality."""
+    rows = []
+    findings = []
+    known = {requirement.req_id: requirement for requirement in requirements}
+    seen = set()
+
+    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or not re.fullmatch(r"REQ-\d{3}", cells[0]):
+            continue
+        req_id = cells[0]
+        status_match = re.fullmatch(r"\*{0,2}(PROVEN|ASSERTED|OPEN)\*{0,2}", cells[2])
+
+        if req_id not in known:
+            findings.append(
+                _finding(
+                    "TRACE_REQ_UNKNOWN",
+                    f"Traceability references unknown {req_id}",
+                    path,
+                    line_number,
+                )
+            )
+        elif req_id in seen:
+            findings.append(
+                _finding(
+                    "TRACE_REQ_DUPLICATE",
+                    f"Duplicate traceability row: {req_id}",
+                    path,
+                    line_number,
+                )
+            )
+        seen.add(req_id)
+
+        if not status_match:
+            findings.append(
+                _finding(
+                    "TRACE_STATUS_MALFORMED",
+                    f"Traceability status is malformed for {req_id}: {cells[2]}",
+                    path,
+                    line_number,
+                )
+            )
+            continue
+
+        status = status_match.group(1)
+        rows.append(TraceRow(req_id=req_id, status=status, path=path, line=line_number))
+        if req_id in known and known[req_id].marker in {"x", "/"} and status == "OPEN":
+            findings.append(
+                _finding(
+                    "TRACE_DONE_OPEN",
+                    f"Done requirement {req_id} is classified OPEN",
+                    path,
+                    line_number,
+                )
+            )
+
+    for req_id, requirement in known.items():
+        if req_id not in seen:
+            findings.append(
+                _finding(
+                    "TRACE_REQ_MISSING",
+                    f"Requirement {req_id} has no traceability row",
+                    requirement.path,
+                    requirement.line,
+                )
+            )
+
+    return tuple(rows), tuple(findings)
+
+
+def _slug(value):
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def _normalize_milestone(value):
+    match = re.match(
+        r"^(v\d+(?:\.\d+)+)(?:[-_\s]+(.*))?$",
+        value.strip(),
+        re.IGNORECASE,
+    )
+    if not match:
+        return "", None
+    version = match.group(1).lower()
+    name = _slug(match.group(2) or "")
+    return version + (f"-{name}" if name else ""), version
+
+
+def inspect_roadmap(path, requirements):
+    """Correlate roadmap status with normalized requirement milestone tags."""
+    milestones = []
+    findings = []
+    for line_number, line in enumerate(path.read_text().splitlines(), 1):
+        match = ROADMAP_LINE_RE.match(line)
+        if not match:
+            continue
+        version = match.group("version").lower()
+        name = (match.group("name") or "").strip()
+        milestone_id = version + (f"-{_slug(name)}" if name else "")
+        milestones.append(
+            RoadmapMilestone(
+                marker=match.group("marker"),
+                version=version,
+                name=name,
+                milestone_id=milestone_id,
+                path=path,
+                line=line_number,
+            )
+        )
+
+    by_id = {milestone.milestone_id: milestone for milestone in milestones}
+    by_version = {milestone.version: milestone for milestone in milestones}
+    grouped = {milestone.milestone_id: [] for milestone in milestones}
+    for requirement in requirements:
+        normalized, version = _normalize_milestone(requirement.milestone or "")
+        milestone = by_id.get(normalized) or by_version.get(version)
+        if milestone is None:
+            findings.append(
+                _finding(
+                    "ROADMAP_MILESTONE_UNKNOWN",
+                    f"{requirement.req_id} milestone does not resolve: {requirement.milestone}",
+                    requirement.path,
+                    requirement.line,
+                )
+            )
+            continue
+        grouped[milestone.milestone_id].append(requirement)
+
+    for milestone in milestones:
+        milestone_requirements = grouped[milestone.milestone_id]
+        if milestone.marker == "✅" and any(
+            requirement.marker == " " for requirement in milestone_requirements
+        ):
+            findings.append(
+                _finding(
+                    "ROADMAP_SHIPPED_OPEN",
+                    f"Shipped milestone {milestone.version} has open requirements",
+                    path,
+                    milestone.line,
+                )
+            )
+        if milestone.marker == "🚧" and not milestone_requirements:
+            findings.append(
+                _finding(
+                    "ROADMAP_ACTIVE_EMPTY",
+                    f"Active milestone {milestone.version} has no requirements",
+                    path,
+                    milestone.line,
+                )
+            )
+
+    return tuple(milestones), tuple(findings)
+
+
+def inspect_state(path):
+    """Validate Saga's compact STATE frontmatter contract."""
+    lines = path.read_text().splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}, (
+            _finding(
+                "STATE_FRONTMATTER_MISSING",
+                "STATE.md must begin with frontmatter",
+                path,
+                1,
+            ),
+        )
+
+    values = {}
+    key_lines = {}
+    for line_number, line in enumerate(lines[1:], 2):
+        if line == "---" or line.startswith("# "):
+            break
+        match = re.match(r"^([a-z_]+):\s*(.*)$", line)
+        if match:
+            values[match.group(1)] = match.group(2).strip().strip('"\'')
+            key_lines[match.group(1)] = line_number
+
+    findings = []
+    for key in STATE_KEYS:
+        if not values.get(key):
+            findings.append(
+                _finding(
+                    "STATE_FRONTMATTER_MISSING",
+                    f"Missing required STATE key: {key}",
+                    path,
+                    1,
+                )
+            )
+
+    def invalid(key, message):
+        findings.append(
+            _finding(
+                "STATE_FRONTMATTER_INVALID",
+                message,
+                path,
+                key_lines.get(key, 1),
+            )
+        )
+
+    if values.get("saga_state_version") not in {None, "1.0"}:
+        invalid("saga_state_version", "saga_state_version must be 1.0")
+    if values.get("status") not in {None, *STATE_STATUSES}:
+        invalid("status", f"Unsupported STATE status: {values['status']}")
+    if "last_updated" in values:
+        try:
+            datetime.fromisoformat(values["last_updated"].replace("Z", "+00:00"))
+        except ValueError:
+            invalid("last_updated", "last_updated must be an ISO-8601 timestamp")
+
+    return values, tuple(findings)
+
+
+def inspect_links(files):
+    """Check local Markdown links in canonical spine records without network access."""
+    findings = []
+    for name in SPINE_FILES:
+        path = files.get(name)
+        if path is None:
+            continue
+        for line_number, line in enumerate(path.read_text().splitlines(), 1):
+            for match in MARKDOWN_LINK_RE.finditer(line):
+                target = match.group(1).strip().split()[0].strip("<>")
+                parsed = urlsplit(target)
+                if parsed.scheme or target.startswith("//") or target.startswith("#"):
+                    continue
+                local_part = unquote(target.split("#", 1)[0])
+                if not local_part:
+                    continue
+                resolved = (path.parent / local_part).resolve()
+                if not resolved.exists():
+                    findings.append(
+                        _finding(
+                            "LINK_LOCAL_MISSING",
+                            f"Local Markdown link does not exist: {target}",
+                            path,
+                            line_number,
+                        )
+                    )
+    return tuple(findings)
+
+
+def inspect_spine(path=None):
+    """Resolve a Saga spine at PATH, defaulting to the current directory."""
+    supplied = Path.cwd() if path is None else Path(path)
+    resolved = supplied.expanduser().resolve()
+    planning_dir = resolved if resolved.name == ".planning" else resolved / ".planning"
+    project_root = planning_dir.parent
+
+    if not planning_dir.is_dir():
+        finding = _finding(
+            "SPINE_NOT_FOUND",
+            "Saga spine directory not found",
+            planning_dir,
+            None,
+        )
+        return Inspection(project_root, planning_dir, {}, (finding,))
+
+    files = {
+        name: (planning_dir / name).resolve()
+        for name in SPINE_FILES
+        if (planning_dir / name).is_file()
+    }
+    requirements = ()
+    findings = ()
+    traceability = ()
+    milestones = ()
+    state = None
+    if "REQUIREMENTS.md" in files:
+        requirements, findings = inspect_requirements(files["REQUIREMENTS.md"])
+    if "TRACEABILITY.md" in files:
+        traceability, trace_findings = inspect_traceability(
+            files["TRACEABILITY.md"], requirements
+        )
+        findings += trace_findings
+    if "ROADMAP.md" in files:
+        milestones, roadmap_findings = inspect_roadmap(files["ROADMAP.md"], requirements)
+        findings += roadmap_findings
+    if "STATE.md" in files:
+        state, state_findings = inspect_state(files["STATE.md"])
+        findings += state_findings
+    findings += inspect_links(files)
+    return Inspection(
+        project_root,
+        planning_dir,
+        files,
+        findings,
+        requirements,
+        traceability,
+        milestones,
+        state,
+    )
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Inspect a Saga project spine without modifying it."
+    )
+    parser.add_argument("path", nargs="?", default=None, help="project or .planning path")
+    parser.add_argument(
+        "--format",
+        choices=("human", "json"),
+        default="human",
+        help="output format (default: human)",
+    )
+    return parser
+
+
+def _json_payload(result):
+    return {
+        "schema_version": "1.0",
+        "project_root": str(result.project_root),
+        "planning_dir": str(result.planning_dir),
+        "clean": not result.findings,
+        "findings": [
+            {
+                "code": finding.code,
+                "severity": finding.severity,
+                "message": finding.message,
+                "path": str(finding.path),
+                "line": finding.line,
+            }
+            for finding in result.findings
+        ],
+    }
+
+
+def _exit_code(result):
+    if any(finding.code == "SPINE_NOT_FOUND" for finding in result.findings):
+        return 2
+    return 1 if result.findings else 0
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        result = inspect_spine(args.path)
+    except (OSError, UnicodeError, ValueError) as error:
+        print(f"saga-lint: {error}", file=sys.stderr)
+        return 2
+
+    if args.format == "json":
+        print(json.dumps(_json_payload(result), indent=2, sort_keys=True))
+        return _exit_code(result)
+
+    if result.findings:
+        for finding in result.findings:
+            location = f"{finding.path}:{finding.line}" if finding.line else str(finding.path)
+            print(f"{finding.severity.upper()} {finding.code}: {finding.message}: {location}")
+        return _exit_code(result)
+
+    print(f"Saga spine: {result.planning_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
