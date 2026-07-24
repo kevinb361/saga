@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +23,13 @@ def test_v2_release_metadata_and_notes_are_coherent() -> None:
     assert "Ten self-named compatibility aliases" in notes
     assert "./install.sh --rollback" in notes
     assert "11 canonical skills plus 10 one-release compatibility aliases" in toolbox
+
+
+def test_ruff_rules_are_explicit_across_tool_versions() -> None:
+    config = tomllib.loads((ROOT / "ruff.toml").read_text(encoding="utf-8"))
+    assert config["target-version"] == "py311"
+    assert config["line-length"] == 100
+    assert config["lint"]["select"] == ["E4", "E7", "E9", "F"]
 
 
 def test_clean_export_policy_excludes_private_root_only() -> None:

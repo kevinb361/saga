@@ -101,7 +101,7 @@ python -m pip install pytest pytest-xdist ruff
 make ci
 ```
 
-The canonical gate validates shell and Node syntax, Python code, all skill metadata and references, exact package discovery, isolated installation lifecycles, deterministic tool behavior, risk and audit-independence invariants, and the Saga spine itself.
+The canonical gate validates shell and Node syntax, Python code under the explicit project `ruff.toml` rule set, all skill metadata and references, exact package discovery, isolated installation lifecycles, deterministic tool behavior, risk and audit-independence invariants, and the Saga spine itself.
 
 See [docs/TOOLBOX.md](docs/TOOLBOX.md) for the complete interface contract, [docs/DESIGN.md](docs/DESIGN.md) for rationale, and [docs/INSTALL.md](docs/INSTALL.md) for installation and rollback.
 
