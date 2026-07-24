@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Dry-run-first deterministic migration of legacy planning records to Saga syntax."""
+
+import argparse
+import difflib
+from pathlib import Path
+import re
+import sys
+
+
+SPINE_FILES = ("STATE.md", "ROADMAP.md", "REQUIREMENTS.md", "TRACEABILITY.md")
+REQ_ID = r"[A-Z][A-Z0-9]*-\d+"
+CANONICAL_REQ_RE = re.compile(
+    rf"^- \[(?P<marker>[ x/])\] \*\*(?P<id>{REQ_ID})\*\* — (?P<rest>.+)$"
+)
+LEGACY_REQ_RE = re.compile(
+    rf"^- \[(?P<marker>[ x/])\] (?:\*\*)?(?P<id>{REQ_ID})(?:\*\*)?:\s*(?P<rest>.+)$"
+)
+MILESTONE_TAG_RE = re.compile(r"\(milestone:\s*[^)]+\)", re.IGNORECASE)
+VERSION_RE = re.compile(r"\bv(?P<version>\d+(?:\.\d+)*)\b", re.IGNORECASE)
+
+
+def resolve_planning(target: Path) -> Path:
+    candidate = target.expanduser().resolve()
+    planning = candidate if candidate.name == ".planning" else candidate / ".planning"
+    if not planning.is_dir():
+        raise FileNotFoundError(f"Saga spine directory not found: {planning}")
+    return planning
+
+
+def normalize_version(value: str) -> str:
+    parts = value.lower().removeprefix("v").split(".")
+    if len(parts) == 1:
+        parts.append("0")
+    return "v" + ".".join(parts)
+
+
+def migrate_state(text: str) -> str:
+    status_map = {
+        "milestone_drained": "complete",
+        "completed": "complete",
+        "done": "complete",
+        "not_started": "idle",
+        "planning": "idle",
+        "in_progress": "active",
+    }
+    output = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        if body.startswith("gsd_state_version:"):
+            body = "saga_state_version: 1.0"
+        elif body.startswith("saga_state_version:"):
+            version = body.split(":", 1)[1].strip().strip('"\'')
+            if version in {"0.1", "1", "1.0"}:
+                body = "saga_state_version: 1.0"
+        match = re.fullmatch(r"status:\s*([^\s#]+)(.*)", body)
+        if match and match.group(1) in status_map:
+            body = f"status: {status_map[match.group(1)]}{match.group(2)}"
+        output.append(body + ending)
+    return "".join(output)
+
+
+def migrate_roadmap(text: str) -> str:
+    output = []
+    checkbox = re.compile(
+        r"^- \[(?P<marker>[ x/])\] (?P<body>\*\*v\d+(?:\.\d+)+[^\n]*)$"
+    )
+    bare = re.compile(r"^(?P<marker>[✅🚧]) (?P<body>\*\*v\d+(?:\.\d+)+[^\n]*)$")
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        match = checkbox.match(body)
+        if match:
+            marker = "✅" if match.group("marker") in {"x", "/"} else "🚧"
+            body = f"- {marker} {match.group('body')}"
+        else:
+            match = bare.match(body)
+            if match:
+                body = f"- {match.group('marker')} {match.group('body')}"
+        output.append(body + ending)
+    return "".join(output)
+
+
+def roadmap_versions(text: str) -> tuple[str, ...]:
+    versions = []
+    for line in text.splitlines():
+        match = re.match(r"^- [✅🚧] \*\*(v\d+(?:\.\d+)+)\b", line, re.IGNORECASE)
+        if match:
+            versions.append(normalize_version(match.group(1)))
+    return tuple(dict.fromkeys(versions))
+
+
+def heading_version(line: str) -> str | None:
+    if not (line.startswith("#") or re.match(r"^\*\*Milestone:\*\*", line, re.IGNORECASE)):
+        return None
+    match = VERSION_RE.search(line)
+    return normalize_version(match.group(0)) if match else None
+
+
+def migrate_requirements(text: str, fallback_version: str | None) -> str:
+    output = []
+    current_version = fallback_version
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        ending = line[len(body):]
+        discovered = heading_version(body)
+        if discovered:
+            current_version = discovered
+
+        match = CANONICAL_REQ_RE.match(body) or LEGACY_REQ_RE.match(body)
+        if match:
+            rest = match.group("rest").strip()
+            if current_version and not MILESTONE_TAG_RE.search(rest):
+                tag = f"(milestone: {current_version})"
+                metadata_offsets = [
+                    offset
+                    for marker in ("(evidence:", "(card:")
+                    if (offset := rest.find(marker)) >= 0
+                ]
+                if metadata_offsets:
+                    offset = min(metadata_offsets)
+                    rest = f"{rest[:offset].rstrip()} {tag} {rest[offset:]}"
+                else:
+                    rest = f"{rest} {tag}"
+            body = f"- [{match.group('marker')}] **{match.group('id')}** — {rest}"
+        output.append(body + ending)
+    return "".join(output)
+
+
+def split_table_row(line: str) -> list[str] | None:
+    if not line.startswith("|"):
+        return None
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def render_table_row(cells: list[str], ending: str) -> str:
+    return "| " + " | ".join(cells) + " |" + ending
+
+
+def migrate_traceability(text: str) -> str:
+    status_map = {
+        "DONE": "ASSERTED",
+        "DEFERRED": "OPEN",
+        "SUPERSEDED": "WAIVED",
+    }
+    lines = text.splitlines(keepends=True)
+    output = list(lines)
+    index = 0
+    while index < len(lines):
+        header = split_table_row(lines[index].rstrip("\r\n"))
+        if not header:
+            index += 1
+            continue
+        lowered = [cell.lower() for cell in header]
+        if "status" not in lowered:
+            index += 1
+            continue
+        status_index = lowered.index("status")
+        insert_statement = status_index == 1
+
+        end = index
+        while end < len(lines) and split_table_row(lines[end].rstrip("\r\n")) is not None:
+            raw = lines[end]
+            body = raw.rstrip("\r\n")
+            ending = raw[len(body):]
+            cells = split_table_row(body)
+            if cells is not None:
+                changed = insert_statement
+                if insert_statement:
+                    label = "Statement (short)" if end == index else ""
+                    cells.insert(1, label)
+                migrated_status_index = status_index + int(insert_statement)
+                if end > index + 1 and migrated_status_index < len(cells):
+                    normalized = cells[migrated_status_index].strip("*").upper()
+                    replacement = status_map.get(normalized)
+                    if replacement and replacement != cells[migrated_status_index]:
+                        cells[migrated_status_index] = replacement
+                        changed = True
+                if changed:
+                    output[end] = render_table_row(cells, ending)
+            end += 1
+        index = end
+    return "".join(output)
+
+
+def migrated_files(planning: Path) -> dict[Path, tuple[str, str]]:
+    paths = {
+        name: planning / name
+        for name in SPINE_FILES
+        if (planning / name).is_file()
+    }
+    originals = {name: path.read_text() for name, path in paths.items()}
+    roadmap = migrate_roadmap(originals.get("ROADMAP.md", ""))
+    versions = roadmap_versions(roadmap)
+    fallback = versions[0] if len(versions) == 1 else None
+    migrators = {
+        "STATE.md": lambda text: migrate_state(text),
+        "ROADMAP.md": lambda _text: roadmap,
+        "REQUIREMENTS.md": lambda text: migrate_requirements(text, fallback),
+        "TRACEABILITY.md": lambda text: migrate_traceability(text),
+    }
+    replacements = {
+        name: migrators[name](text)
+        for name, text in originals.items()
+    }
+    return {
+        paths[name]: (originals[name], replacements[name])
+        for name in paths
+        if originals[name] != replacements[name]
+    }
+
+
+def print_diff(changes: dict[Path, tuple[str, str]], planning: Path) -> None:
+    for path, (before, after) in changes.items():
+        relative = path.relative_to(planning.parent)
+        sys.stdout.writelines(
+            difflib.unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=str(relative),
+                tofile=str(relative),
+            )
+        )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Preview or apply deterministic legacy-to-Saga spine migrations."
+    )
+    parser.add_argument("path", nargs="?", default=".", help="project or .planning path")
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="apply changes (default: print a read-only unified diff)",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        planning = resolve_planning(Path(args.path))
+        changes = migrated_files(planning)
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"saga-migrate: {exc}", file=sys.stderr)
+        return 2
+
+    if not changes:
+        print(f"clean: no deterministic migrations available: {planning}")
+        return 0
+    if not args.write:
+        print_diff(changes, planning)
+        print(f"dry-run: {len(changes)} file(s) would change; rerun with --write")
+        return 1
+
+    for path, (_, after) in changes.items():
+        path.write_text(after)
+    print(f"updated: {len(changes)} file(s): {planning}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

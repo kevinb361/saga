@@ -19,13 +19,12 @@ import sys
 from collections import defaultdict
 
 
-# Regex for a REQ line:
-#   - [ ] **REQ-NNN** — title ... (milestone: slug) (depends: ...)
-#   - [x] or [/] for done
+# Requirement IDs support both the fresh-file REQ-NNN default and semantic
+# project IDs such as SAFE-21 or ACCESS-01.
+REQ_ID_PATTERN = r'[A-Z][A-Z0-9]*-\d+'
 REQ_RE = re.compile(
-    r'^- \[(?P<marker>[ x/])\] '
-    r'\*\*REQ-(?P<id>\d{3})\*\* — (?P<rest>.+)$',
-    re.IGNORECASE,
+    rf'^- \[(?P<marker>[ x/])\] '
+    rf'\*\*(?P<id>{REQ_ID_PATTERN})\*\* — (?P<rest>.+)$'
 )
 
 MILESTONE_RE = re.compile(r'\(milestone:\s*(.+?)\)', re.IGNORECASE)
@@ -40,40 +39,66 @@ def parse_requirements(path):
     depends_raw is the raw string from the (depends: ...) tag, or None.
     """
     reqs = []
+    seen_ids = set()
     with open(path) as f:
-        for line_num, line in enumerate(f, 1):
-            m = REQ_RE.match(line.rstrip('\n'))
-            if not m:
-                continue
-            marker = m.group('marker')
-            req_id = f"REQ-{m.group('id')}"
-            # Tags may appear anywhere after the title (done lines carry
-            # (evidence: ...) etc.) — search the whole remainder, and cut the
-            # title at the earliest recognized tag.
-            tags = m.group('rest')
-            starts = [mt.start() for mt in (
-                MILESTONE_RE.search(tags), DEPENDS_RE.search(tags),
-                NOT_BEFORE_RE.search(tags)) if mt]
-            title = (tags[:min(starts)] if starts else tags).strip()
+        lines = list(f)
+    has_requirements_section = any(
+        line.strip() == '## Requirements' for line in lines
+    )
+    in_requirements = not has_requirements_section
+    for line_num, line in enumerate(lines, 1):
+        raw_line = line.rstrip('\n')
+        if raw_line.strip() == '## Requirements':
+            in_requirements = True
+            continue
+        if has_requirements_section and in_requirements and raw_line.startswith('## '):
+            in_requirements = False
+        if not in_requirements or not raw_line.startswith('- ['):
+            continue
 
-            milestone_m = MILESTONE_RE.search(tags)
-            milestone = milestone_m.group(1).strip() if milestone_m else None
+        m = REQ_RE.match(raw_line)
+        if not m:
+            print(
+                f"ERROR: line {line_num}: malformed requirement line",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        marker = m.group('marker')
+        req_id = m.group('id')
+        if req_id in seen_ids:
+            print(
+                f"ERROR: {req_id} line {line_num}: duplicate requirement ID",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        seen_ids.add(req_id)
+        # Tags may appear anywhere after the title (done lines carry
+        # (evidence: ...) etc.) — search the whole remainder, and cut the
+        # title at the earliest recognized tag.
+        tags = m.group('rest')
+        starts = [mt.start() for mt in (
+            MILESTONE_RE.search(tags), DEPENDS_RE.search(tags),
+            NOT_BEFORE_RE.search(tags)) if mt]
+        title = (tags[:min(starts)] if starts else tags).strip()
 
-            depends_m = DEPENDS_RE.search(tags)
-            depends_raw = depends_m.group(1).strip() if depends_m else None
+        milestone_m = MILESTONE_RE.search(tags)
+        milestone = milestone_m.group(1).strip() if milestone_m else None
 
-            not_before_m = NOT_BEFORE_RE.search(tags)
-            not_before = not_before_m.group(1).strip() if not_before_m else None
+        depends_m = DEPENDS_RE.search(tags)
+        depends_raw = depends_m.group(1).strip() if depends_m else None
 
-            reqs.append({
-                'id': req_id,
-                'title': title,
-                'marker': marker,
-                'milestone': milestone,
-                'depends_raw': depends_raw,
-                'not_before': not_before,
-                'line_num': line_num,
-            })
+        not_before_m = NOT_BEFORE_RE.search(tags)
+        not_before = not_before_m.group(1).strip() if not_before_m else None
+
+        reqs.append({
+            'id': req_id,
+            'title': title,
+            'marker': marker,
+            'milestone': milestone,
+            'depends_raw': depends_raw,
+            'not_before': not_before,
+            'line_num': line_num,
+        })
     return reqs
 
 
@@ -319,9 +344,9 @@ def find_sinks(cards):
 def build_convergence_body(milestone, task_ids=None):
     """Build the body for a convergence close-out card.
 
-    Instructs the worker to run the saga close-out chain per
-    saga-loop step 4 semantics with the fail-closed auditor contract,
-    including checkbox-flip instructions for completed REQs (REQ-036).
+    Instructs the worker to record claims from completed child cards before
+    independent verification, then apply milestone close-out only when the
+    frontier-produced traceability artifacts prove those claims.
 
     Args:
         milestone: milestone slug
@@ -329,13 +354,14 @@ def build_convergence_body(milestone, task_ids=None):
     """
     body = (
         f"Convergence close-out for milestone {milestone}.\n\n"
-        f"Run the saga close-out chain:\n"
-        f"1. /saga-verify\n"
+        "Run the saga close-out chain:\n"
+        "1. Confirm every projected child card is terminal-complete. If any card "
+        "is missing, blocked, or failed, STOP without changing requirement markers.\n"
     )
 
-    # REQ-036: checkbox-flip instructions between verify and ROADMAP flip
+    # REQ-036: completed child cards supply the claim marker and evidence that
+    # saga-verify subsequently grades. Verification cannot prove an OPEN marker.
     if task_ids:
-        # Build per-REQ flip instructions with card refs (skip convergence itself)
         flip_lines = []
         for req_id, card_id in sorted(task_ids.items()):
             if req_id == '__convergence__':
@@ -348,36 +374,35 @@ def build_convergence_body(milestone, task_ids=None):
             )
         if flip_lines:
             body += (
-                "2. After /saga-verify shows the milestone's REQs PROVEN, "
-                "flip each completed REQ's checkbox in .planning/REQUIREMENTS.md:\n"
+                "2. Record each terminal-complete card as a claim before verification:\n"
             )
             body += "\n".join(flip_lines)
             body += (
-                "\n"
-                "   Read the current line first, then replace — never assume exact whitespace.\n"
+                "\n   Read the current line first, then replace — never assume exact whitespace.\n"
             )
         else:
             body += (
-                "2. After /saga-verify shows the milestone's REQs PROVEN, "
-                "flip each completed REQ's checkbox `[ ]` -> `[x]` in "
-                ".planning/REQUIREMENTS.md with card-ref evidence notes, "
-                "using read-then-replace on the actual line "
-                "(never a pre-composed exact-match patch — REQ-023 pattern).\n"
+                "2. Record each terminal-complete card by flipping its requirement "
+                "checkbox `[ ]` -> `[x]` and appending card-ref evidence. Use "
+                "read-then-replace on the actual line (never a pre-composed "
+                "exact-match patch — REQ-023 pattern).\n"
             )
     else:
         body += (
-            "2. After /saga-verify shows the milestone's REQs PROVEN, "
-            "flip each completed REQ's checkbox `[ ]` -> `[x]` in "
-            ".planning/REQUIREMENTS.md with card-ref evidence notes, "
-            "using read-then-replace on the actual line "
-            "(never a pre-composed exact-match patch — REQ-023 pattern).\n"
+            "2. Record each terminal-complete card by flipping its requirement "
+            "checkbox `[ ]` -> `[x]` and appending card-ref evidence. Use "
+            "read-then-replace on the actual line (never a pre-composed "
+            "exact-match patch — REQ-023 pattern).\n"
         )
 
     body += (
-        f"3. Milestone-scoped flip gate: if every REQ tagged to the active milestone "
-        f"is PROVEN, flip the ROADMAP marker 🚧→✅ and run /saga-state reconcile.\n"
-        f"4. /saga-audit --milestone {milestone}\n"
-        f"5. Report one verdict.\n\n"
+        "3. Run the independent frontier close-out check: /saga-verify, then "
+        f"/saga-audit --milestone {milestone}.\n"
+        "4. Milestone-scoped flip gate: read the freshly written artifacts. If "
+        "every REQ tagged to the active milestone is PROVEN, flip the ROADMAP "
+        "marker 🚧→✅ and run /saga-state reconcile. If any is ASSERTED or OPEN, "
+        "STOP without flipping.\n"
+        "5. Report one verdict.\n\n"
         f"Frontier-gated verify + audit: these MUST run on a frontier model that "
         f"did NOT execute these slices. If this worker is non-frontier, delegate to "
         f"the frontier auditor in .planning/config.json close_out_auditor "
@@ -392,6 +417,31 @@ def build_convergence_body(milestone, task_ids=None):
     )
 
     return body
+
+
+def _parse_created_task(result, label, idempotency_key):
+    """Return a validated task ID from a successful Hermes JSON response."""
+    try:
+        data = json.loads(result.stdout)
+    except (json.JSONDecodeError, TypeError) as error:
+        excerpt = str(result.stdout)[:200]
+        print(
+            f"ERROR: Hermes returned invalid JSON for {label} "
+            f"(idempotency-key {idempotency_key}): {excerpt!r}: {error}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    task_id = data.get('id') or data.get('task_id') if isinstance(data, dict) else None
+    if not isinstance(task_id, str) or not task_id.strip():
+        excerpt = str(result.stdout)[:200]
+        print(
+            f"ERROR: Hermes returned no task ID for {label} "
+            f"(idempotency-key {idempotency_key}): {excerpt!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return task_id
 
 
 def execute(cards, milestone, repo, _run_cmd=None, with_convergence=True, assignee='default'):
@@ -454,12 +504,13 @@ def execute(cards, milestone, repo, _run_cmd=None, with_convergence=True, assign
     # Create each card in order with --parent inline
     for req_id in creation_order:
         card = card_map[req_id]
+        idempotency_key = f'saga:{repo}:{milestone}:{card["req"]}'
         cmd = [
             'hermes', 'kanban', 'create',
             '--assignee', assignee,
             '--skill', 'saga-next',
             '--workspace', f'worktree:{repo}',
-            '--idempotency-key', f'saga:{repo}:{milestone}:{card["req"]}',
+            '--idempotency-key', idempotency_key,
             '--json',
             f"{card['req']}: {card['title']}",
         ]
@@ -472,9 +523,9 @@ def execute(cards, milestone, repo, _run_cmd=None, with_convergence=True, assign
             print(f"ERROR creating card for {card['req']}: {result.stderr}", file=sys.stderr)
             sys.exit(1)
 
-        data = json.loads(result.stdout)
-        task_id = data.get('id') or data.get('task_id')
-        task_ids[card['req']] = task_id
+        task_ids[card['req']] = _parse_created_task(
+            result, card['req'], idempotency_key
+        )
 
     if not with_convergence:
         print(
@@ -486,12 +537,13 @@ def execute(cards, milestone, repo, _run_cmd=None, with_convergence=True, assign
     # Create ONE convergence card as child of all sink cards (leaves of the
     # post-knee-cap DAG). Its body carries the fail-closed auditor contract.
     sinks = find_sinks(cards)
+    convergence_key = f'saga:{repo}:{milestone}:__convergence__'
     cmd = [
         'hermes', 'kanban', 'create',
         '--assignee', assignee,
         '--skill', 'saga-next',
         '--workspace', f'worktree:{repo}',
-        '--idempotency-key', f'saga:{repo}:{milestone}:__convergence__',
+        '--idempotency-key', convergence_key,
         '--json',
         '--body', build_convergence_body(milestone, task_ids),
         f'convergence close-out for {milestone}',
@@ -504,8 +556,9 @@ def execute(cards, milestone, repo, _run_cmd=None, with_convergence=True, assign
         print(f"ERROR creating convergence card: {result.stderr}", file=sys.stderr)
         sys.exit(1)
 
-    conv_data = json.loads(result.stdout)
-    task_ids['__convergence__'] = conv_data.get('id') or conv_data.get('task_id')
+    task_ids['__convergence__'] = _parse_created_task(
+        result, 'convergence card', convergence_key
+    )
 
     print(json.dumps({'cards': cards, 'task_ids': task_ids}, indent=2))
     return list(task_ids.values())

@@ -10,6 +10,7 @@ import tarfile
 
 ROOT = Path(__file__).parents[1]
 SCRIPT = ROOT / "bin" / "saga-lint"
+PROJECTOR = ROOT / "bin" / "saga-project"
 EXAMPLE = ROOT / "examples" / "minimal"
 VALID_FIXTURE = ROOT / "tests" / "fixtures" / "saga_lint" / "valid"
 INVALID_FIXTURE = ROOT / "tests" / "fixtures" / "saga_lint" / "invalid"
@@ -66,6 +67,22 @@ def run_lint(path, output_format="human"):
         text=True,
         capture_output=True,
         check=False,
+    )
+
+
+def _string_assignment(path, name):
+    tree = ast.parse(path.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets
+        ):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} assignment missing from {path}")
+
+
+def test_linter_and_projector_share_requirement_id_grammar():
+    assert _string_assignment(SCRIPT, "REQ_ID_PATTERN") == _string_assignment(
+        PROJECTOR, "REQ_ID_PATTERN"
     )
 
 
@@ -188,6 +205,14 @@ def test_archive_policy_excludes_only_the_private_root_spine():
     assert "examples/minimal/.planning/STATE.md" in names
     assert "tests/fixtures/saga_lint/valid/.planning/STATE.md" in names
     assert "tests/fixtures/saga_lint/invalid/.planning/STATE.md" in names
+
+
+def test_retro_skill_creates_the_canonical_planning_file():
+    skill = (ROOT / "skills" / "saga" / "saga-retro" / "SKILL.md").read_text()
+    normalized = " ".join(skill.split())
+
+    assert "create `.planning/RETROSPECTIVE.md`" in normalized
+    assert "create `RETROSPECTIVE.md`" not in normalized
 
 
 def test_state_reference_statuses_match_validator_contract():

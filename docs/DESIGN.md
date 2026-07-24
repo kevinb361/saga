@@ -14,6 +14,8 @@ AI-assisted projects need durable context, but most generated work logs are rare
 
 Saga keeps that core as plain Markdown and avoids building a workflow engine around it.
 
+The v2.0 package broadens this foundation into a small operator toolbox while preserving Saga's independent close-out boundary. The implemented names, activation rules, and safety invariants are defined in [the unified operator toolbox contract](TOOLBOX.md); the package and four-harness installation expose that version-controlled surface directly.
+
 ## Design principles
 
 ### Files are the interface
@@ -22,7 +24,7 @@ Project state must remain readable with ordinary tools and repairable without Sa
 
 ### One bounded slice
 
-`/saga-next` chooses and executes one inspectable unit of work. Long-running orchestration belongs outside the agent context so each slice can start fresh. `/saga-loop` is a deliberately bounded convenience, not an unbounded phase runner.
+`saga-run` chooses and executes one inspectable unit of work by default. An explicit natural-language request can enter its capped loop mode, but long-horizon orchestration still belongs outside the agent context so slices can start fresh. Looping is a bounded convenience, never an unbounded phase runner.
 
 ### Verification is mechanical
 
@@ -30,7 +32,7 @@ A model’s confidence is not evidence. Each completed slice names a determinist
 
 ### Risk is explicit
 
-Every slice is classified as inspect-only, repo-only, live mutation, or destructive. Safe local work proceeds; risky mutation requires explicit approval, a rollback path, and observable evidence.
+Every slice is classified as inspect-only, repo-only, live mutation, or destructive. Safe local work proceeds; risky mutation requires explicit approval, a rollback path, and observable evidence. Bounded Ansible execution is the deliberate no-double-prompt exception: invoking Saga or assigning a card for that scoped slice supplies approval to run it. Saga still discloses the target and recovery/evidence contract, and still stops for broad, destructive, ambiguous, or explicitly human-only playbooks.
 
 ### Records must earn their keep
 
@@ -66,7 +68,7 @@ Saga can work from `CLAUDE.md`, `AGENTS.md`, and `README.md` when `.planning/` i
 
 ## Invocation policy
 
-`/saga-next` and `/saga-state` may be selected when the operator asks what is next or where work stopped. Skills that create durable records are normally explicit invocations. Mechanical close-out may update traceability and milestone state only when the evidence gate is fully green; judgment calls still stop for the operator.
+`saga-run` and `saga-state` may be selected when the operator asks what is next or where work stopped. Interview, planning, documentation, and independent-audit intents remain explicit. Natural language supplies scope rather than workflow flags. Mechanical close-out may update traceability and milestone state only after `saga-check` and an independent `saga-audit` are green; judgment calls still stop for the operator.
 
 ## Multi-model operation
 

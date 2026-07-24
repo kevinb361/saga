@@ -153,7 +153,27 @@ def test_duplicate_requirement_id_reports_second_line(tmp_path):
 def test_malformed_requirement_id_is_reported(tmp_path):
     result = inspect_requirements(
         tmp_path,
-        ["- [ ] **REQ-12** — malformed (milestone: test)"],
+        ["- [ ] **REQ-AB** — malformed (milestone: test)"],
+    )
+
+    assert finding_codes(result) == ["REQ_ID_MALFORMED"]
+    assert result.findings[0].line == 5
+
+
+def test_lowercase_requirement_id_is_reported(tmp_path):
+    result = inspect_requirements(
+        tmp_path,
+        ["- [ ] **safe-21** — lowercase (milestone: test)"],
+    )
+
+    assert finding_codes(result) == ["REQ_ID_MALFORMED"]
+    assert result.findings[0].line == 5
+
+
+def test_missing_requirement_markup_is_reported(tmp_path):
+    result = inspect_requirements(
+        tmp_path,
+        ["- [ ] REQ-001 — missing bold markup (milestone: test)"],
     )
 
     assert finding_codes(result) == ["REQ_ID_MALFORMED"]
@@ -240,6 +260,18 @@ def inspect_traceability(tmp_path, requirement_lines, traceability_rows):
     return load_lint_module().inspect_spine(tmp_path)
 
 
+def test_semantic_requirement_id_has_traceability_coverage(tmp_path):
+    result = inspect_traceability(
+        tmp_path,
+        ["- [x] **SAFE-21** — no route mutation (milestone: test)"],
+        ["| SAFE-21 | no route mutation | **PROVEN** | tests/test_safety.py |"],
+    )
+
+    assert finding_codes(result) == []
+    assert result.requirements[0].req_id == "SAFE-21"
+    assert result.traceability[0].req_id == "SAFE-21"
+
+
 def test_missing_traceability_row_is_reported_at_requirement(tmp_path):
     result = inspect_traceability(
         tmp_path,
@@ -262,6 +294,17 @@ def test_malformed_traceability_status_is_reported_at_trace_row(tmp_path):
     assert finding_codes(result) == ["TRACE_STATUS_MALFORMED"]
     assert result.findings[0].path.name == "TRACEABILITY.md"
     assert result.findings[0].line == 5
+
+
+def test_waived_traceability_status_is_accepted(tmp_path):
+    result = inspect_traceability(
+        tmp_path,
+        ["- [ ] **REQ-001** — deferred with waiver (milestone: test)"],
+        ["| REQ-001 | fixture | **WAIVED** | decisions/0001-waiver.md |"],
+    )
+
+    assert finding_codes(result) == []
+    assert result.traceability[0].status == "WAIVED"
 
 
 def test_duplicate_traceability_row_is_reported(tmp_path):
@@ -325,6 +368,26 @@ def test_shipped_milestone_with_open_requirement_is_reported(tmp_path):
 
     assert finding_codes(result) == ["ROADMAP_SHIPPED_OPEN"]
     assert result.findings[0].line == 5
+
+
+def test_shipped_milestone_with_waived_open_requirement_is_clean(tmp_path):
+    planning = make_spine(tmp_path)
+    (planning / "REQUIREMENTS.md").write_text(
+        "# requirements\n\n## Requirements\n\n"
+        "- [ ] **REQ-001** — accepted gap (milestone: v0.0-test)\n"
+    )
+    (planning / "TRACEABILITY.md").write_text(
+        "# traceability\n\n| Requirement | Description | Status | Evidence |\n"
+        "|---|---|---|---|\n"
+        "| REQ-001 | accepted gap | **WAIVED** | decisions/0001-waiver.md |\n"
+    )
+    (planning / "ROADMAP.md").write_text(
+        "# roadmap\n\n## Milestones\n\n- ✅ **v0.0 Test** — shipped\n"
+    )
+
+    result = load_lint_module().inspect_spine(tmp_path)
+
+    assert finding_codes(result) == []
 
 
 def test_active_milestone_without_requirements_is_reported(tmp_path):
@@ -421,7 +484,7 @@ def test_external_markdown_link_is_not_followed(tmp_path):
 def test_human_output_includes_stable_code_and_source_line(tmp_path):
     planning = make_spine(tmp_path)
     (planning / "REQUIREMENTS.md").write_text(
-        "# requirements\n\n## Requirements\n\n- [ ] **REQ-12** — malformed\n"
+        "# requirements\n\n## Requirements\n\n- [ ] **REQ-AB** — malformed\n"
     )
 
     result = subprocess.run(

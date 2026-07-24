@@ -27,8 +27,16 @@ especially on production projects.
    - **ASSERTED** — a "claimed done" marker (`[x]` or `[/]`) but no locatable evidence. _This is the dangerous class — surface it loudly._
    - **OPEN** — checkbox `[ ]`, not yet done.
    - **WAIVED** — an open/partial gap with a `decisions/*.md` waiver accepting it (link the waiver).
-4. **Write** `.planning/TRACEABILITY.md` (table format in `reference.md`): every REQ-ID → status → evidence
-   pointer or gap note.
+4. **Write** `.planning/TRACEABILITY.md` using the executable Saga linter schema below:
+
+   ```markdown
+   | Requirement | Description | Status | Evidence |
+   |-------------|-------------|--------|----------|
+   | REQ-001 | Short behavior description | **PROVEN** | concrete artifact |
+   | REQ-002 | Short behavior description | **OPEN** | — |
+   ```
+
+   Status must be the third data column and one of `PROVEN`, `ASSERTED`, `OPEN`, or `WAIVED` (bold markup is accepted). Include every requirement exactly once.
 5. **Report** the gaps: list every ASSERTED and OPEN REQ-ID explicitly. Do not bury them under a summary count.
 6. If all requirements are PROVEN or WAIVED for the active milestone, flag `/saga-spec merge` as the next
    step to bake verified behavior into the living spec library.

@@ -12,8 +12,9 @@ from urllib.parse import unquote, urlsplit
 
 
 SPINE_FILES = ("STATE.md", "ROADMAP.md", "REQUIREMENTS.md", "TRACEABILITY.md")
+REQ_ID_PATTERN = r"[A-Z][A-Z0-9]*-\d+"
 REQ_LINE_RE = re.compile(
-    r"^- \[(?P<marker>.)\] \*\*(?P<id>REQ-[^*]+)\*\* — (?P<rest>.+)$"
+    r"^- \[(?P<marker>.)\] \*\*(?P<id>[^*]+)\*\* — (?P<rest>.+)$"
 )
 MILESTONE_RE = re.compile(r"\(milestone:\s*(.+?)\)", re.IGNORECASE)
 DEPENDS_RE = re.compile(r"\(depends:\s*(.+?)\)", re.IGNORECASE)
@@ -156,9 +157,18 @@ def inspect_requirements(path):
     findings = []
     seen = set()
 
-    for line_number, line in enumerate(path.read_text().splitlines(), 1):
-        if not line.startswith("- [") or "**REQ-" not in line:
+    lines = path.read_text().splitlines()
+    has_requirements_section = any(line.strip() == "## Requirements" for line in lines)
+    in_requirements = not has_requirements_section
+    for line_number, line in enumerate(lines, 1):
+        if line.strip() == "## Requirements":
+            in_requirements = True
             continue
+        if has_requirements_section and in_requirements and line.startswith("## "):
+            in_requirements = False
+        if not in_requirements or not line.startswith("- ["):
+            continue
+
         match = REQ_LINE_RE.match(line)
         if not match:
             findings.append(
@@ -168,7 +178,7 @@ def inspect_requirements(path):
 
         marker = match.group("marker")
         req_id = match.group("id")
-        if not re.fullmatch(r"REQ-\d{3}", req_id):
+        if not re.fullmatch(REQ_ID_PATTERN, req_id):
             findings.append(_finding("REQ_ID_MALFORMED", f"Malformed requirement ID: {req_id}", path, line_number))
             continue
         if marker not in {" ", "x", "/"}:
@@ -250,10 +260,10 @@ def inspect_traceability(path, requirements):
         if not line.startswith("|"):
             continue
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) < 3 or not re.fullmatch(r"REQ-\d{3}", cells[0]):
+        if len(cells) < 3 or not re.fullmatch(REQ_ID_PATTERN, cells[0]):
             continue
         req_id = cells[0]
-        status_match = re.fullmatch(r"\*{0,2}(PROVEN|ASSERTED|OPEN)\*{0,2}", cells[2])
+        status_match = re.fullmatch(r"\*{0,2}(PROVEN|ASSERTED|OPEN|WAIVED)\*{0,2}", cells[2])
 
         if req_id not in known:
             findings.append(
@@ -329,8 +339,8 @@ def _normalize_milestone(value):
     return version + (f"-{name}" if name else ""), version
 
 
-def inspect_roadmap(path, requirements):
-    """Correlate roadmap status with normalized requirement milestone tags."""
+def inspect_roadmap(path, requirements, traceability=()):
+    """Correlate roadmap status with requirements and accepted waivers."""
     milestones = []
     findings = []
     for line_number, line in enumerate(path.read_text().splitlines(), 1):
@@ -369,10 +379,13 @@ def inspect_roadmap(path, requirements):
             continue
         grouped[milestone.milestone_id].append(requirement)
 
+    trace_statuses = {row.req_id: row.status for row in traceability}
     for milestone in milestones:
         milestone_requirements = grouped[milestone.milestone_id]
         if milestone.marker == "✅" and any(
-            requirement.marker == " " for requirement in milestone_requirements
+            requirement.marker == " "
+            and trace_statuses.get(requirement.req_id) != "WAIVED"
+            for requirement in milestone_requirements
         ):
             findings.append(
                 _finding(
@@ -516,7 +529,9 @@ def inspect_spine(path=None):
         )
         findings += trace_findings
     if "ROADMAP.md" in files:
-        milestones, roadmap_findings = inspect_roadmap(files["ROADMAP.md"], requirements)
+        milestones, roadmap_findings = inspect_roadmap(
+            files["ROADMAP.md"], requirements, traceability
+        )
         findings += roadmap_findings
     if "STATE.md" in files:
         state, state_findings = inspect_state(files["STATE.md"])

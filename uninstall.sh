@@ -1,70 +1,28 @@
 #!/usr/bin/env bash
-# Remove only Saga-owned skill links from Claude Code, Codex, and/or Hermes.
+# Remove only Saga-owned v2 skill links from Claude Code, Codex, Hermes, and/or
+# Pi. This is a thin wrapper over bin/saga-skill-install.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOURCE="$ROOT/skills/saga"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 usage() {
   cat <<'EOF'
-Usage: ./uninstall.sh [--all | --claude | --codex | --hermes ...]
+Usage: ./uninstall.sh [--all | --claude | --codex | --hermes | --pi ...]
 
-With no options, uninstalls from all supported agents. Agent homes may be
-overridden with CLAUDE_HOME, CODEX_HOME, and HERMES_HOME.
+Removes only the v2 skill links this checkout owns. Foreign files and links are
+left untouched. With no agent flag, targets all supported agents. Agent homes may
+be overridden with CLAUDE_HOME, CODEX_HOME, HERMES_HOME, and PI_HOME.
+
+To reverse a migration to the exact pre-migration links, use ./install.sh --rollback.
 EOF
 }
 
-agents=()
-add_agent() {
-  local candidate="$1" existing
-  for existing in "${agents[@]:-}"; do
-    [[ "$existing" == "$candidate" ]] && return
-  done
-  agents+=("$candidate")
-}
-
-if [[ $# -eq 0 ]]; then
-  agents=(claude codex hermes)
-else
-  for arg in "$@"; do
-    case "$arg" in
-      --all) agents=(claude codex hermes) ;;
-      --claude) add_agent claude ;;
-      --codex) add_agent codex ;;
-      --hermes) add_agent hermes ;;
-      -h|--help) usage; exit 0 ;;
-      *) echo "error: unknown option: $arg" >&2; usage >&2; exit 2 ;;
-    esac
-  done
-fi
-
-agent_home() {
-  case "$1" in
-    claude) printf '%s\n' "${CLAUDE_HOME:-$HOME/.claude}" ;;
-    codex) printf '%s\n' "${CODEX_HOME:-$HOME/.codex}" ;;
-    hermes) printf '%s\n' "${HERMES_HOME:-$HOME/.hermes}" ;;
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -h|--help) usage; exit 0 ;;
+    *) args+=("$arg") ;;
   esac
-}
-
-resolve_path() {
-  python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$1"
-}
-
-skills=()
-for skill in "$SOURCE"/saga-*; do
-  [[ -d "$skill" ]] && skills+=("$(basename "$skill")")
 done
 
-for agent in "${agents[@]}"; do
-  destination="$(agent_home "$agent")/skills"
-  removed=0
-  for name in "${skills[@]}"; do
-    link="$destination/$name"
-    expected="$SOURCE/$name"
-    if [[ -L "$link" ]] && [[ "$(resolve_path "$link")" == "$(resolve_path "$expected")" ]]; then
-      rm "$link"
-      ((removed += 1))
-    fi
-  done
-  printf 'saga: %d skill link(s) removed for %s from %s\n' "$removed" "$agent" "$destination"
-done
+exec python3 "$ROOT/bin/saga-skill-install" uninstall ${args[@]+"${args[@]}"}

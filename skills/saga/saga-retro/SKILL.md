@@ -13,8 +13,9 @@ record of what was learned, so the next milestone doesn't relearn it. Append-onl
 
 ## Process
 
-1. Find the project's retro file: prefer an existing `.planning/RETROSPECTIVE.md` or `LEARNINGS.md`; if neither
-   exists, create `RETROSPECTIVE.md` with a `# Retrospective: <project>` heading.
+1. Find the project's retro file: prefer an existing `.planning/RETROSPECTIVE.md`; otherwise use an existing
+   `.planning/LEARNINGS.md` or repository-root `LEARNINGS.md`. If none exists, create
+   `.planning/RETROSPECTIVE.md` with a `# Retrospective: <project>` heading.
 2. Append a dated entry capturing at least one of: **what happened**, **what surprised you**, **what to do
    differently**. Operator terms, not generic filler — "went well" is a no-op; "icmplib beat fping on jitter under
    load, kept it" is signal.

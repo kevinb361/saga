@@ -65,19 +65,19 @@ For the same milestone, replace the existing `## Audit: <milestone>` section ent
 - **warning:** Should fix before shipping. Won't immediately break things but creates technical debt or hidden risk. Examples: missing error handler on a rare path, test gap on an edge case.
 - **info:** Note for future improvement. Not blocking, not urgent. Examples: style inconsistency, could add a convenience helper, minor documentation gap.
 
-## Relationship to /saga-verify
+## Relationship to saga-check and saga-run
 
-`saga-verify` is mechanical: does requirement X have evidence Y? It produces TRACEABILITY.md with PROVEN/ASSERTED/OPEN/WAIVED classifications.
+`saga-check` is structural and evidentiary: can the spine be parsed, and does requirement X have evidence Y? It produces TRACEABILITY.md with PROVEN/ASSERTED/OPEN/WAIVED classifications.
 
-`saga-audit` is judgment: is the implementation actually good? It reads TRACEABILITY.md as input (especially ASSERTED items) but goes further — reviewing code quality, architecture, and operational readiness that traceability can't capture.
+`saga-audit` is independent judgment: is the implementation actually good? It reads TRACEABILITY.md as input (especially ASSERTED items) but goes further — reviewing code quality, architecture, and operational readiness that traceability cannot capture.
 
-Run order: `/saga-verify` first (mechanical check), then `/saga-audit` (quality judgment). The audit should always reference the verify results.
+Close-out order is strict: independent `saga-check` first, independent `saga-audit` second, and only then may `saga-run` perform the mechanical ROADMAP/STATE completion flip. If check or audit fails, is incomplete, or was run by a slice executor, the milestone remains open. `saga-audit` itself never flips completion state.
 
 ## When to run
 
-- After `/saga-loop` drains a milestone (all slices completed or escalated)
-- Before marking a milestone as `shipped` in STATE.md
-- When merging work from multiple agents (deep execution + codex escalations)
+- After `saga-run` drains a milestone without escalation or risk stops
+- After independent `saga-check` and before marking a milestone shipped
+- When merging work from multiple agents, from a context that executed none of their reviewed slices
 - Periodically for long-running projects (even without a fresh milestone)
 
 ## Arguments

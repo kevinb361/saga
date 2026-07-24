@@ -1,0 +1,37 @@
+{
+  "name": "saga-operator-toolbox",
+  "version": "2.0.0",
+  "private": false,
+  "description": "Unified operator and Saga skill toolbox for Pi and compatible agents.",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "agent-skills",
+    "saga"
+  ],
+  "pi": {
+    "skills": [
+      "./skills/ops/ops-grill-me",
+      "./skills/ops/ops-troubleshoot",
+      "./skills/ops/ops-review",
+      "./skills/ops/ops-upgrade",
+      "./skills/ops/ops-document",
+      "./skills/saga/saga-init",
+      "./skills/saga/saga-plan",
+      "./skills/saga/saga-run",
+      "./skills/saga/saga-state",
+      "./skills/saga/saga-check",
+      "./skills/saga/saga-audit",
+      "./skills/compat/saga-next",
+      "./skills/compat/saga-loop",
+      "./skills/compat/saga-verify",
+      "./skills/compat/saga-lint",
+      "./skills/compat/adversarial-review",
+      "./skills/compat/review",
+      "./skills/compat/security-review",
+      "./skills/compat/debug",
+      "./skills/compat/dependency-upgrade",
+      "./skills/compat/write-docs"
+    ]
+  }
+}

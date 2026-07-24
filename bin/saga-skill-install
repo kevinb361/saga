@@ -1,0 +1,431 @@
+#!/usr/bin/env python3
+"""Install, migrate, roll back, or uninstall Saga's v2 cross-harness skill surface.
+
+The v2 surface is an explicit manifest, never a glob: eleven canonical skills
+(five ``ops-*`` plus six ``saga-*`` lifecycle) and four one-release compatibility
+aliases whose own frontmatter identity matches their directory name. See
+``docs/INSTALL.md`` and REQ-083 for the contract.
+
+Commands (first positional argument):
+
+    install     ensure the v2 surface exists; additive and idempotent; refuses
+                to silently repoint an owned link that still points at a
+                different in-repo skill (run ``migrate`` instead).
+    migrate     upgrade from a legacy surface: snapshot the exact pre-migration
+                links, write the v2 surface, and prune owned legacy-only names.
+    rollback    restore every managed link to its exact pre-migration state from
+                the snapshot.
+    uninstall   remove only the v2 surface links this repository owns.
+
+Agent selection flags: --all --claude --codex --hermes --pi (default: all).
+Agent homes are overridable via CLAUDE_HOME/CODEX_HOME/HERMES_HOME/PI_HOME.
+AGENT_SKILLS_ROOT identifies the legacy agent-skills checkout to migrate
+(default: ~/projects/agent-skills). The migration snapshot path is
+SAGA_MIGRATION_STATE (default under XDG state); it is never written inside this
+repository.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SKILLS_ROOT = ROOT / "skills"
+
+# Explicit v2 manifest. name -> source directory relative to the repository root.
+CANONICAL = {
+    "ops-grill-me": "skills/ops/ops-grill-me",
+    "ops-troubleshoot": "skills/ops/ops-troubleshoot",
+    "ops-review": "skills/ops/ops-review",
+    "ops-upgrade": "skills/ops/ops-upgrade",
+    "ops-document": "skills/ops/ops-document",
+    "saga-init": "skills/saga/saga-init",
+    "saga-plan": "skills/saga/saga-plan",
+    "saga-run": "skills/saga/saga-run",
+    "saga-state": "skills/saga/saga-state",
+    "saga-check": "skills/saga/saga-check",
+    "saga-audit": "skills/saga/saga-audit",
+}
+# One-release compatibility aliases. Each source is a self-named forwarder skill
+# (its SKILL.md name matches its own directory), so no directory carries foreign
+# frontmatter and no second directory duplicates a canonical identity. Every
+# legacy visible name with an unambiguous single canonical v2 route/lens gets a
+# forwarder: the four legacy Saga names plus the six legacy general names that
+# route cleanly to one ops-* skill or lens.
+ALIASES = {
+    "saga-next": "skills/compat/saga-next",
+    "saga-loop": "skills/compat/saga-loop",
+    "saga-verify": "skills/compat/saga-verify",
+    "saga-lint": "skills/compat/saga-lint",
+    "adversarial-review": "skills/compat/adversarial-review",
+    "review": "skills/compat/review",
+    "security-review": "skills/compat/security-review",
+    "debug": "skills/compat/debug",
+    "dependency-upgrade": "skills/compat/dependency-upgrade",
+    "write-docs": "skills/compat/write-docs",
+}
+SURFACE = {**CANONICAL, **ALIASES}
+
+# Legacy general skill names published by the separate agent-skills repository.
+# Six route to a forwarder above; the remaining four are internal disciplines or
+# universal invariants with no single canonical route, so they carry no forwarder
+# and are pruned (and rolled back) rather than repointed.
+LEGACY_GENERAL = {
+    "adversarial-review",
+    "api-design",
+    "debug",
+    "dependency-upgrade",
+    "design-an-interface",
+    "review",
+    "security-review",
+    "tdd",
+    "verify-before-complete",
+    "write-docs",
+}
+
+AGENTS = ("claude", "codex", "hermes", "pi")
+_HOME_ENV = {
+    "claude": ("CLAUDE_HOME", "~/.claude"),
+    "codex": ("CODEX_HOME", "~/.codex"),
+    "hermes": ("HERMES_HOME", "~/.hermes"),
+    "pi": ("PI_HOME", "~/.agents"),
+}
+
+USAGE = (
+    "usage: saga-skill-install {install|migrate|rollback|uninstall} "
+    "[--all|--claude|--codex|--hermes|--pi ...]"
+)
+
+
+def agent_home(agent: str) -> Path:
+    env_name, default = _HOME_ENV[agent]
+    value = os.environ.get(env_name)
+    if value:
+        return Path(value)
+    return Path(os.path.expanduser(default))
+
+
+def destination(agent: str) -> Path:
+    return agent_home(agent) / "skills"
+
+
+def snapshot_path() -> Path:
+    override = os.environ.get("SAGA_MIGRATION_STATE")
+    if override:
+        return Path(override)
+    state = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return Path(state) / "saga" / "skill-migration.json"
+
+
+def _within(link: Path, root: Path) -> bool:
+    target = os.path.realpath(link)
+    root_real = os.path.realpath(root)
+    return target == root_real or target.startswith(root_real + os.sep)
+
+
+def _frontmatter_name(skill_file: Path) -> str | None:
+    try:
+        text = skill_file.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith("name:"):
+            return line.split(":", 1)[1].strip().strip('"').strip("'")
+    return None
+
+
+def legacy_agent_skills_root() -> Path:
+    value = os.environ.get("AGENT_SKILLS_ROOT", "~/projects/agent-skills")
+    return Path(os.path.expanduser(value))
+
+
+def _is_agent_skills_legacy(link: Path) -> bool:
+    """True only for a legacy general skill from the declared old checkout.
+
+    Matching directory shape and frontmatter is not ownership proof: an unrelated
+    checkout can publish the same skill name. Require the resolved target to be the
+    exact name under ``AGENT_SKILLS_ROOT/skills`` as well as matching metadata.
+    """
+    name = link.name
+    if name not in LEGACY_GENERAL:
+        return False
+    real = Path(os.path.realpath(link))
+    expected = Path(os.path.realpath(legacy_agent_skills_root() / "skills" / name))
+    if real != expected:
+        return False
+    skill_file = real / "SKILL.md"
+    return skill_file.is_file() and _frontmatter_name(skill_file) == name
+
+
+def classify(link: Path) -> tuple[str, str | None]:
+    """Return (state, raw_target). state is owned | legacy | foreign | absent.
+
+    owned   -- a symlink that resolves into this repository's skills tree.
+    legacy  -- a symlink at a known legacy general name resolving into the
+               separate agent-skills checkout (see _is_agent_skills_legacy).
+    foreign -- any other existing entry (non-symlink, or a symlink elsewhere).
+    absent  -- nothing at the path.
+    """
+    if link.is_symlink():
+        raw = os.readlink(link)
+        if _within(link, SKILLS_ROOT):
+            return ("owned", raw)
+        if _is_agent_skills_legacy(link):
+            return ("legacy", raw)
+        return ("foreign", raw)
+    if os.path.lexists(link):
+        return ("foreign", None)
+    return ("absent", None)
+
+
+def _matches_source(link: Path, name: str) -> bool:
+    return os.path.realpath(link) == os.path.realpath(ROOT / SURFACE[name])
+
+
+def make_link(link: Path, source: Path) -> None:
+    if link.is_symlink() or os.path.lexists(link):
+        link.unlink()
+    os.symlink(source, link)
+
+
+def managed_names(dest: Path) -> set[str]:
+    """Every name migration/rollback governs in ``dest``.
+
+    Always the full v2 surface, plus any pre-existing entry this repository is
+    responsible for: an owned ``saga-*``/``ops-*`` link (e.g. a legacy Saga name
+    left by the old glob installer) or a legacy general link from the agent-skills
+    checkout. Foreign entries are never pulled into the managed set.
+    """
+    names: set[str] = set(SURFACE)
+    if not dest.is_dir():
+        return names
+    for entry in dest.iterdir():
+        name = entry.name
+        state = classify(entry)[0]
+        if state == "owned" and (name.startswith("saga-") or name.startswith("ops-")):
+            names.add(name)
+        elif state == "legacy":
+            names.add(name)
+    return names
+
+
+def load_snapshot() -> dict:
+    path = snapshot_path()
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_snapshot(snap: dict) -> None:
+    path = snapshot_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(snap, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _check_sources() -> list[str]:
+    return [f"missing skill source: {ROOT / rel}" for rel in SURFACE.values() if not (ROOT / rel).is_dir()]
+
+
+def _fail(messages: list[str]) -> int:
+    for message in messages:
+        print(f"error: {message}", file=sys.stderr)
+    return 1
+
+
+def cmd_install(agents: list[str]) -> int:
+    source_errors = _check_sources()
+    if source_errors:
+        return _fail(source_errors)
+
+    conflicts: list[str] = []
+    todo: dict[str, list[str]] = {}
+    for agent in agents:
+        dest = destination(agent)
+        pending: list[str] = []
+        for name in SURFACE:
+            link = dest / name
+            state, _ = classify(link)
+            if state == "foreign":
+                conflicts.append(f"refusing to replace foreign entry: {link}")
+            elif state == "legacy":
+                conflicts.append(
+                    f"{link} is a legacy agent-skills link; "
+                    "run './install.sh --migrate' to upgrade reversibly"
+                )
+            elif state == "owned":
+                if not _matches_source(link, name):
+                    conflicts.append(
+                        f"{link} points at another in-repo skill; "
+                        "run './install.sh --migrate' to upgrade"
+                    )
+            else:
+                pending.append(name)
+        todo[agent] = pending
+
+    if conflicts:
+        return _fail(conflicts)
+
+    for agent in agents:
+        dest = destination(agent)
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in todo[agent]:
+            make_link(dest / name, ROOT / SURFACE[name])
+        print(
+            f"saga: {len(SURFACE)} v2 skill link(s) present for {agent} in {dest} "
+            f"({len(todo[agent])} created)"
+        )
+    return 0
+
+
+def cmd_migrate(agents: list[str]) -> int:
+    source_errors = _check_sources()
+    if source_errors:
+        return _fail(source_errors)
+
+    managed_by_agent: dict[str, set[str]] = {}
+    conflicts: list[str] = []
+    for agent in agents:
+        dest = destination(agent)
+        managed = managed_names(dest)
+        managed_by_agent[agent] = managed
+        for name in managed:
+            if classify(dest / name)[0] == "foreign":
+                conflicts.append(f"refusing to replace foreign entry: {dest / name}")
+    if conflicts:
+        return _fail(conflicts)
+
+    # Persist the exact pre-migration state for every managed name BEFORE any
+    # mutation, so rollback is possible even if a later step fails. A destination
+    # already recorded by an earlier migrate is preserved, so repeated migrations
+    # still roll back to the original legacy surface.
+    snap = load_snapshot()
+    for agent in agents:
+        dest = destination(agent)
+        key = os.path.abspath(dest)
+        if key in snap:
+            continue
+        entry = {}
+        for name in sorted(managed_by_agent[agent]):
+            state, raw = classify(dest / name)
+            entry[name] = {"state": state, "target": raw}
+        snap[key] = entry
+    save_snapshot(snap)
+
+    for agent in agents:
+        dest = destination(agent)
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in SURFACE:
+            make_link(dest / name, ROOT / SURFACE[name])
+        pruned = 0
+        for name in managed_by_agent[agent] - set(SURFACE):
+            link = dest / name
+            if classify(link)[0] in ("owned", "legacy"):
+                link.unlink()
+                pruned += 1
+        print(
+            f"saga: migrated {len(SURFACE)} v2 skill link(s) for {agent} in {dest} "
+            f"({pruned} legacy link(s) pruned)"
+        )
+    print(f"saga: pre-migration snapshot written to {snapshot_path()}")
+    return 0
+
+
+def cmd_rollback(agents: list[str]) -> int:
+    snap = load_snapshot()
+    if not snap:
+        return _fail([f"no migration snapshot found at {snapshot_path()}"])
+
+    selected = {os.path.abspath(destination(agent)) for agent in agents}
+    # Preflight every selected snapshot path before touching anything. If any
+    # current entry is foreign (something replaced our link since migration), the
+    # whole rollback aborts with zero mutation rather than clobbering it or
+    # restoring a partial surface around it.
+    plan: list[tuple[str, str, dict]] = []
+    conflicts: list[str] = []
+    for key, entry in snap.items():
+        if key not in selected:
+            continue
+        for name, record in entry.items():
+            link = Path(key) / name
+            if classify(link)[0] == "foreign":
+                conflicts.append(f"refusing to roll back over foreign entry: {link}")
+            else:
+                plan.append((key, name, record))
+    if conflicts:
+        return _fail(conflicts)
+
+    counts: dict[str, int] = {}
+    for key, name, record in plan:
+        link = Path(key) / name
+        if link.is_symlink():
+            link.unlink()
+        if record["state"] in ("owned", "legacy"):
+            Path(key).mkdir(parents=True, exist_ok=True)
+            os.symlink(record["target"], link)
+        counts[key] = counts.get(key, 0) + 1
+    for key in sorted(counts):
+        print(f"saga: rolled back {counts[key]} managed link(s) in {key}")
+    return 0
+
+
+def cmd_uninstall(agents: list[str]) -> int:
+    for agent in agents:
+        dest = destination(agent)
+        removed = 0
+        for name in SURFACE:
+            link = dest / name
+            state, _ = classify(link)
+            if state == "owned" and _matches_source(link, name):
+                link.unlink()
+                removed += 1
+        print(f"saga: {removed} v2 skill link(s) removed for {agent} in {dest}")
+    return 0
+
+
+def parse_agents(args: list[str]) -> tuple[list[str] | None, str | None]:
+    selected: list[str] = []
+    for arg in args:
+        if arg == "--all":
+            selected = list(AGENTS)
+        elif arg in ("--claude", "--codex", "--hermes", "--pi"):
+            name = arg[2:]
+            if name not in selected:
+                selected.append(name)
+        else:
+            return None, f"error: unknown option: {arg}"
+    return (selected or list(AGENTS)), None
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args:
+        print(USAGE, file=sys.stderr)
+        return 2
+    mode, rest = args[0], args[1:]
+    if mode in ("-h", "--help"):
+        print(USAGE)
+        return 0
+    commands = {
+        "install": cmd_install,
+        "migrate": cmd_migrate,
+        "rollback": cmd_rollback,
+        "uninstall": cmd_uninstall,
+    }
+    if mode not in commands:
+        print(f"error: unknown command: {mode}", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
+    agents, error = parse_agents(rest)
+    if error is not None:
+        print(error, file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        return 2
+    assert agents is not None
+    return commands[mode](agents)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

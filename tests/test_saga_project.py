@@ -132,6 +132,81 @@ def test_done_dep_dropped():
     assert cards[1]["depends"] == []
 
 
+def test_malformed_requirement_line_fails_closed():
+    """Requirement-like rows that cannot be parsed must block projection."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write("# test\n\n## Requirements\n\n")
+        f.write("- [ ] **REQ-001** — valid (milestone: test) (depends: none)\n")
+        f.write("- [?] **REQ-002** — malformed (milestone: test) (depends: none)\n")
+        f.flush()
+        rc, stdout, stderr = run_project(f.name)
+        os.unlink(f.name)
+
+    assert rc != 0
+    assert stdout == ""
+    assert "malformed requirement line" in stderr
+
+
+def test_lowercase_requirement_id_fails_closed():
+    """Projector must reject the same non-canonical ID casing as saga-lint."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write("# test\n\n## Requirements\n\n")
+        f.write("- [ ] **safe-21** — lowercase (milestone: test) (depends: none)\n")
+        f.flush()
+        rc, stdout, stderr = run_project(f.name)
+        os.unlink(f.name)
+
+    assert rc != 0
+    assert stdout == ""
+    assert "malformed requirement line" in stderr
+
+
+def test_missing_requirement_markup_fails_closed():
+    """A checkbox row in Requirements cannot disappear due to missing bold markup."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write("# test\n\n## Requirements\n\n")
+        f.write("- [ ] **REQ-001** — valid (milestone: test) (depends: none)\n")
+        f.write("- [ ] REQ-002 — missing bold markup (milestone: test)\n")
+        f.flush()
+        rc, stdout, stderr = run_project(f.name)
+        os.unlink(f.name)
+
+    assert rc != 0
+    assert stdout == ""
+    assert "malformed requirement line" in stderr
+
+
+def test_semantic_requirement_ids_are_projected_and_gate_convergence():
+    """Documented SAFE/ACCESS-style IDs participate in the complete DAG."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write("# test\n\n## Requirements\n\n")
+        f.write("- [ ] **REQ-001** — feature (milestone: test) (depends: none)\n")
+        f.write("- [ ] **SAFE-21** — invariant (milestone: test) (depends: REQ-001)\n")
+        f.flush()
+        rc, stdout, stderr = run_project(f.name)
+        os.unlink(f.name)
+
+    assert rc == 0, stderr
+    data = json.loads(stdout)
+    assert [card["req"] for card in data["cards"]] == ["REQ-001", "SAFE-21"]
+    assert data["convergence"]["depends"] == ["SAFE-21"]
+
+
+def test_duplicate_requirement_id_fails_closed():
+    """Duplicate IDs must block projection instead of collapsing DAG nodes."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+        f.write("# test\n\n## Requirements\n\n")
+        f.write("- [ ] **REQ-001** — first (milestone: test) (depends: none)\n")
+        f.write("- [ ] **REQ-001** — duplicate (milestone: test) (depends: none)\n")
+        f.flush()
+        rc, stdout, stderr = run_project(f.name)
+        os.unlink(f.name)
+
+    assert rc != 0
+    assert stdout == ""
+    assert "duplicate requirement ID" in stderr
+
+
 def test_unknown_dep_fails():
     """Dependency on a non-existent REQ-ID → exit nonzero."""
     rc, stdout, stderr = run_project(os.path.join(FIXTURES, "unknown_dep.md"))
@@ -505,8 +580,8 @@ def test_convergence_body_contains_checkbox_flip_instruction():
     assert "REQ-023" in body, "body must reference REQ-023 pattern"
 
 
-def test_convergence_body_checkbox_flip_after_verify_before_roadmap():
-    """Checkbox-flip instruction appears after /saga-verify and before ROADMAP flip."""
+def test_convergence_body_claim_before_verify_and_roadmap():
+    """Card evidence becomes a claim before independent verification and close-out."""
     rc, stdout, stderr = run_project(os.path.join(FIXTURES, "pure_chain.md"))
     assert rc == 0, f"expected success, got {rc}: {stderr}"
 
@@ -517,8 +592,8 @@ def test_convergence_body_checkbox_flip_after_verify_before_roadmap():
     flip_pos = body.index("[ ]")
     roadmap_pos = body.index("ROADMAP")
 
-    assert verify_pos < flip_pos, "checkbox flip must come after /saga-verify"
-    assert flip_pos < roadmap_pos, "checkbox flip must come before ROADMAP flip"
+    assert flip_pos < verify_pos, "claim marker must be recorded before /saga-verify"
+    assert verify_pos < roadmap_pos, "verification must gate the ROADMAP flip"
 
 
 def test_convergence_body_with_task_ids_includes_card_refs():
@@ -625,6 +700,46 @@ def test_not_before_invalid_date_fails_closed(tmp_path):
     import pytest as _pt
     with _pt.raises(SystemExit):
         _sp.apply_not_before(cards, reqs, today=_date(2026, 7, 11))
+
+
+def test_execute_fails_cleanly_on_invalid_hermes_json(capsys):
+    mod = _load_script_module()
+
+    def fake_run(_cmd, **_kw):
+        result = MockRunResult([])
+        result.stdout = "not-json"
+        return result
+
+    with pytest.raises(SystemExit):
+        mod.execute(
+            [{"req": "REQ-201", "title": "a", "depends": []}],
+            "m9",
+            "/tmp/repo",
+            _run_cmd=fake_run,
+        )
+
+    assert "invalid JSON for REQ-201" in capsys.readouterr().err
+
+
+def test_execute_fails_cleanly_when_hermes_omits_task_id(capsys):
+    mod = _load_script_module()
+
+    def fake_run(_cmd, **_kw):
+        result = MockRunResult([])
+        result.stdout = json.dumps({"status": "created"})
+        return result
+
+    with pytest.raises(SystemExit):
+        mod.execute(
+            [{"req": "REQ-201", "title": "a", "depends": []}],
+            "m9",
+            "/tmp/repo",
+            _run_cmd=fake_run,
+        )
+
+    error = capsys.readouterr().err
+    assert "no task ID for REQ-201" in error
+    assert "idempotency-key saga:/tmp/repo:m9:REQ-201" in error
 
 
 def test_execute_sets_assignee_and_idempotency(tmp_path):

@@ -31,11 +31,13 @@ function sagaSeg(startDir) {
         // No segment when there's no active milestone (e.g. between_milestones).
         if (!fm.milestone || fm.milestone.toLowerCase() === "none") return "";
         const glyph =
-          fm.status === "in_progress"
-            ? "○" // ○
+          fm.status === "active"
+            ? "○"
             : fm.status === "blocked"
-              ? "✗" // ✗
-              : "✓"; // ✓
+              ? "✗"
+              : fm.status === "paused" || fm.status === "idle"
+                ? "–"
+                : "✓";
         const name = fm.milestone_name ? ` ${fm.milestone_name}` : "";
         return `\x1b[2m${glyph} ${fm.milestone}${name}\x1b[0m`; // dim, quiet
       }

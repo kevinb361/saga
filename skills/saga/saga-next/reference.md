@@ -59,6 +59,17 @@ Rules:
 - roll back by discarding current state
 - run broad cleanup without a bounded target
 
+### Ansible approval
+
+Do not add a second permission round-trip for a bounded Ansible slice. Starting Saga with that slice, entering a
+Saga loop that reaches it, or assigning a card that names it counts as approval to run the exact scoped
+`ansible-playbook` command. Keep the live-mutation label and disclose the target, rollback/recovery path, and
+post-run readback. Stop only when the playbook is fleet-wide/unbounded, destructive, ambiguous, lacks recovery,
+or project guidance explicitly marks it human-only.
+
+Static Ansible checks (`ansible-lint`, `yamllint`, and `ansible-playbook --syntax-check`) remain inspect-only.
+Do not assume `--check` is side-effect-free unless project guidance or tests establish that contract.
+
 ## Legacy phase-plan compatibility
 
 Old plans under `.planning/phases/` may be read as source material. Saga must not create new phase directories or require an external workflow engine.
@@ -85,7 +96,8 @@ Action: <execute now | stop for approval | blocked because ...>
 
 Stop before action when:
 
-- live or destructive mutation was not explicitly approved
+- non-Ansible live or destructive mutation was not explicitly approved
+- an Ansible playbook is broad/unbounded, destructive, ambiguous, lacks recovery, or is locally marked human-only
 - rollback is missing for production-like mutation
 - evidence is stale or contradictory
 - unrelated dirty changes would be overwritten

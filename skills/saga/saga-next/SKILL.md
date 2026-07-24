@@ -59,11 +59,17 @@ Completion: the plan is on disk AND the rest of STATE.md is unchanged.
    - `repo-only`: local source/docs/tests/derived-artifact edits.
    - `live-mutation`: deploy, restart, reindex, service config, network fetch/refresh, power, or production-ish change.
    - `destructive`: deletion, rollback, data loss, irreversible migration.
+   - **Ansible approval rule:** a Saga invocation or assigned card that names a bounded Ansible slice is itself
+     approval to run its scoped `ansible-playbook` command. Do not ask again merely because Ansible changes a
+     managed host. This exception requires an exact playbook, bounded host/limit, rollback or idempotent recovery
+     path, and post-run evidence. It never covers all-host/fleet-wide, destructive, ambiguous, or locally marked
+     human-only execution.
      Completion: risk label, touched system, rollback/evidence requirement, and stop/continue recommendation are explicit.
 
 5. **Execute or stop.** Execute inspect-only/repo-only slices directly when the current tool/user context allows
-   it. For live-mutation/destructive slices, stop before mutation unless the operator explicitly approved that
-   mutation in this invocation. Completion: no risky mutation happens by implication.
+   it. Execute a bounded Ansible slice directly under the step-4 approval rule without a redundant permission
+   prompt. For other live-mutation/destructive slices, stop before mutation unless the operator explicitly
+   approved that mutation in this invocation. Completion: no risky mutation happens by implication.
 
 6. **Verify at the gate — the gate decides, not you.** Resolve the project's gate command in this order:
    `.planning/config.json` `gate` key → `make ci` if a Makefile defines it → the repo's evident test/lint

@@ -1,6 +1,6 @@
 ---
 name: saga-audit
-description: "Post-execution quality audit of a completed milestone. Frontier-model review: architecture, code quality, unintended side effects, test gaps. Runs after /saga-loop drains or /saga-verify flags ASSERTED gaps."
+description: "Independently audit a completed milestone from a fresh frontier-capable context for correctness, safety, tests, architecture, and operability. Runs after saga-check and before any completion flip."
 category: "saga"
 disable-model-invocation: true
 argument-hint: "[--milestone X.Y | --focus <area>]"
@@ -8,9 +8,13 @@ argument-hint: "[--milestone X.Y | --focus <area>]"
 
 # /saga-audit
 
-Post-execution quality audit for a completed milestone. Designed to run on a frontier model after a local model has executed slices via `/saga-loop`. This is the judgment layer — not mechanical traceability, but actual code quality, architecture soundness, and risk assessment.
+Post-execution quality audit for a completed milestone. Run from a fresh frontier-capable context that did not execute any reviewed slice. Model capability alone does not create independence: a frontier executor cannot audit its own work. This is the judgment layer — not `saga-check` traceability, but actual code quality, architecture soundness, and risk assessment.
+
+`saga-audit` never flips ROADMAP, closes the milestone, or rewrites STATE completion. `saga-run` may perform that mechanical step only after both independent `saga-check` and this audit complete successfully.
 
 ## Process
+
+0. **Prove independence.** Identify who or what executed the milestone slices. If the current context executed any reviewed slice, stop without writing `AUDIT.md` and emit a ready-to-paste handoff for a fresh frontier-capable context. If independence or model capability cannot be established, fail closed rather than self-certify.
 
 1. **Read context.** Load STATE.md, ROADMAP.md, REQUIREMENTS.md, TRACEABILITY.md, and RETROSPECTIVE.md from `.planning/`. Identify the active milestone and its scope. Also check `.planning/config.json` for a `close_out_auditor` key: if absent or empty, WARN in the audit report — without it, a non-frontier close-out on this project stops dead at the frontier-verify gate (paste-handoff only, no autonomous close). Recommend copying the validated value from saga's own config. **Record the auditing model name** (e.g., from the current session's model/provider, or from `close_out_auditor` if running as a delegated auditor) — it goes into the `Auditor:` line in the audit output.
 
@@ -31,6 +35,6 @@ Post-execution quality audit for a completed milestone. Designed to run on a fro
 
 ## Completion criterion
 
-DONE when `.planning/AUDIT.md` exists with a dated audit entry covering all five pillars, every ASSERTED item from TRACEABILITY.md is addressed, and the operator has a clear pass/fail recommendation with specific follow-up items. The audit must name concrete files and lines, not vague concerns.
+DONE when `.planning/AUDIT.md` exists with a dated audit entry covering all five pillars, every ASSERTED item from TRACEABILITY.md is addressed, and the operator has a clear pass/fail recommendation with specific follow-up items. The audit must name concrete files and lines, not vague concerns. A failed, incomplete, same-executor, or non-frontier audit is NOT DONE and leaves the milestone open; it never triggers or performs a completion flip.
 
 See `reference.md` for the AUDIT.md template, pillar definitions, and severity levels.

@@ -21,9 +21,10 @@ that frontmatter is non-negotiable.
 
 ### note / pause
 
-1. Update `## Current Position` (phase, plan, status, a dated `Last activity:` line).
-2. Append anything in-flight to `## Active Work`; append any "ugly-but-works, fix-later" item to `## Deferred`.
-3. Update the YAML frontmatter: set `last_updated` to today's ISO timestamp and refresh `last_activity`.
+1. **Edit an existing STATE.md in place.** Read the complete file first and change only the relevant frontmatter values and named sections. Never rebuild an existing file from the template, truncate unrelated sections, or reorder history; the template in `reference.md` is only for a genuinely absent file.
+2. Update `## Current Position` (phase, plan, status, a dated `Last activity:` line).
+3. Append anything in-flight to `## Active Work`; append any "ugly-but-works, fix-later" item to `## Deferred`.
+4. Update the YAML frontmatter: set `last_updated` to today's ISO timestamp and refresh `last_activity`.
    **Preserve every other frontmatter key** (version marker, `milestone`, `milestone_name`, `status`,
    `progress`) — only change what actually changed; never drop a key. If STATE.md is absent, create it from the
    template in `reference.md`.

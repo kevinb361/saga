@@ -14,7 +14,8 @@ Loop contract for <project>:
   Stop conditions:
   - All open slices completed (gate green)
   - Escalation after 2 gate failures
-  - Live-mutation/destructive slice without explicit approval
+  - Non-Ansible live-mutation/destructive slice without explicit approval
+  - Ansible slice that is broad, destructive, ambiguous, or locally marked human-only
   - Frontier-shaped work detected
   - No forward progress (STATE.md unchanged after an iteration)
   - Milestone shifted mid-loop (concurrent modification)
@@ -53,7 +54,7 @@ Next: <preview of what comes next, or "draining...">
 
 N = current iteration count. M = total estimated or "∞" if unknown. Risk level matches the slice classification from `/saga-next` (inspect-only, repo-only, live-mutation, destructive).
 
-For live-mutation or destructive slices, add explicit approval prompt:
+For non-Ansible live-mutation or destructive slices, add an explicit approval prompt:
 
 ```
 [N/M] ⚠ <slice description> — <live-mutation>
@@ -62,7 +63,13 @@ Rollback: <brief rollback path if known>
 Approve? (yes/no)
 ```
 
-Do not execute until the operator confirms. This is per-slice risk disclosure, not just the upfront contract.
+Do not execute until the operator confirms. For a bounded Ansible slice, disclose and execute without prompting again:
+
+```
+[N/M] ▶ <slice description> — <live-mutation / Ansible pre-approved by loop invocation>
+Touches: <bounded hosts/services>
+Rollback: <rollback or idempotent recovery path>
+```
 
 ## Termination conditions
 
@@ -204,7 +211,7 @@ Consider using `--max` to bound runs explicitly rather than relying on implicit 
 
 ## Anti-patterns
 
-- **Never auto-approve live-mutation slices.** Even in a loop, risky work stops for human review. Per-slice approval is mandatory.
+- **Do not auto-approve general live mutation.** Bounded Ansible is the deliberate exception: starting the loop or assigning a card that names the slice supplies approval, so do not ask again. Broad/fleet-wide, destructive, ambiguous, or locally human-only Ansible still stops.
 - **Never skip the operator confirmation in step 2.** This is a session loop that may touch many files and services. Explicit consent is required.
 - **Never create `.planning/` if absent.** Report the missing spine and suggest `--bootstrap` via `/saga-next`.
 - **Never claim "fresh context" per iteration.** This is an inline loop — context accumulates. Each `/saga-next` reads from disk, which is the reliability mechanism. Be honest about what the loop does.
